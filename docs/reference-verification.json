@@ -1,0 +1,129 @@
+{
+  "schemaVersion": 1,
+  "tolerance": {
+    "rmse": 0.2,
+    "maxError": 4,
+    "reason": "Documented Chromium scaled text-edge rasterization variance; geometry and colour shifts exceed this limit."
+  },
+  "results": [
+    {
+      "project": "astra",
+      "scenes": 23,
+      "maxError": 0,
+      "rmse": 0,
+      "documentedDifferences": [],
+      "failures": []
+    },
+    {
+      "project": "edu",
+      "scenes": 83,
+      "maxError": 5,
+      "rmse": 0.008664057280178663,
+      "documentedDifferences": [
+        {
+          "scene": "c9_smooth",
+          "rmse": 0.012147816447594375,
+          "max": 5,
+          "bounds": [436, 15, 621, 38],
+          "diffPixels": 46
+        },
+        {
+          "scene": "c12_nan",
+          "rmse": 0.012103072956898178,
+          "max": 5,
+          "bounds": [436, 15, 621, 38],
+          "diffPixels": 46
+        }
+      ],
+      "failures": []
+    },
+    {
+      "project": "board",
+      "scenes": 10,
+      "maxError": 0,
+      "rmse": 0,
+      "documentedDifferences": [],
+      "failures": []
+    },
+    {
+      "project": "bos-vertical",
+      "scenes": 8,
+      "maxError": 0,
+      "rmse": 0,
+      "documentedDifferences": [],
+      "failures": []
+    },
+    {
+      "project": "bos",
+      "scenes": 9,
+      "maxError": 0,
+      "rmse": 0,
+      "documentedDifferences": [],
+      "failures": []
+    },
+    {
+      "project": "bos2",
+      "scenes": 9,
+      "maxError": 0,
+      "rmse": 0,
+      "documentedDifferences": [],
+      "failures": []
+    },
+    {
+      "project": "bos3-vertical",
+      "scenes": 8,
+      "maxError": 0,
+      "rmse": 0,
+      "documentedDifferences": [],
+      "failures": []
+    },
+    {
+      "project": "bos3",
+      "scenes": 9,
+      "maxError": 0,
+      "rmse": 0,
+      "documentedDifferences": [],
+      "failures": []
+    },
+    {
+      "project": "bos4-vertical",
+      "scenes": 8,
+      "maxError": 0,
+      "rmse": 0,
+      "documentedDifferences": [],
+      "failures": []
+    },
+    {
+      "project": "bos4",
+      "scenes": 9,
+      "maxError": 0,
+      "rmse": 0,
+      "documentedDifferences": [],
+      "failures": []
+    },
+    {
+      "project": "comictest",
+      "scenes": 5,
+      "maxError": 0,
+      "rmse": 0,
+      "documentedDifferences": [],
+      "failures": []
+    },
+    {
+      "project": "private",
+      "scenes": 24,
+      "maxError": 0,
+      "rmse": 0,
+      "documentedDifferences": [],
+      "failures": []
+    },
+    {
+      "project": "public",
+      "scenes": 10,
+      "maxError": 0,
+      "rmse": 0,
+      "documentedDifferences": [],
+      "failures": []
+    }
+  ]
+}

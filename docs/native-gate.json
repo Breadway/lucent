@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "passed": true,
+  "prerequisites": [
+    "both film collections migrated",
+    "all existing scenes exercised",
+    "pinned seek comparisons passed",
+    "all original reference scene midpoints compared",
+    "portable TS/frame/colour/codec/resume integration tests passed"
+  ],
+  "documentedDifferences": [
+    {
+      "scene": "c9_smooth",
+      "rmse": 0.012147816447594375,
+      "max": 5,
+      "bounds": [436, 15, 621, 38],
+      "diffPixels": 46
+    },
+    {
+      "scene": "c12_nan",
+      "rmse": 0.012103072956898178,
+      "max": 5,
+      "bounds": [436, 15, 621, 38],
+      "diffPixels": 46
+    }
+  ]
+}

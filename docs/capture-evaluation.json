@@ -1,0 +1,98 @@
+{
+  "schemaVersion": 1,
+  "pipelineBenchmark": {
+    "report": "benchmarks/portable-native-1080p-h264.json",
+    "capturePairData": "../out/bench/capture-pair.json",
+    "resolution": "1920x1080",
+    "frames": 60,
+    "codec": "h264",
+    "repetitions": 3,
+    "chromiumPngMedianWallClockSeconds": 18.42,
+    "rawVideoFrameMedianWallClockSeconds": 40.49,
+    "rawVideoFrameThroughputChange": -0.545,
+    "promotionEligible": false,
+    "environmentFinding": "Chromium reported SwiftShader and no active graphics acceleration. Raw RGBA transfer and PNG conversion increased end-to-end export time on this system.",
+    "platform": "linux/x64",
+    "cpu": "AMD Ryzen AI 7 350 w/ Radeon 860M",
+    "node": "v22.23.3",
+    "chromium": "HeadlessChrome/153.0.8010.12",
+    "ffmpeg": "n9.0.2",
+    "pngWallClockSeconds": [19.463087, 18.02, 18.42],
+    "rawVideoFrameWallClockSeconds": [40.49, 39.61, 41.51],
+    "browserGraphics": "ANGLE Vulkan SwiftShader",
+    "browserGraphicsActive": false,
+    "h264Encoder": "vaapi",
+    "h264HardwareEncoderActive": true,
+    "drawingMsPerFrame": {
+      "png": [249.7, 226.2, 233.4],
+      "rawVideoFrame": [234.4, 230.6, 245.4]
+    },
+    "captureMsPerFrame": {
+      "png": [38.9, 40.5, 39.1],
+      "rawVideoFrame": [398.4, 385.7, 402.0]
+    },
+    "rawCopyMsPerFrame": [2.8, 2.7, 2.9],
+    "rawTransferMsPerFrame": [146.7, 143.9, 150.9],
+    "allRunsByCaptureModeMachineReadable": true
+  },
+  "project": "public",
+  "backend": "browser",
+  "reference": "lossless Chromium PNG",
+  "webcodecs": {
+    "available": true,
+    "canvasSource": true,
+    "eligibleForPromotion": false,
+    "encoders": {
+      "h264": {
+        "config": {
+          "alpha": "discard",
+          "bitrate": 30000000,
+          "bitrateMode": "variable",
+          "codec": "avc1.640028",
+          "contentHint": "",
+          "framerate": 30,
+          "hardwareAcceleration": "no-preference",
+          "height": 1080,
+          "latencyMode": "quality",
+          "width": 1920
+        },
+        "supported": true
+      },
+      "av1": {
+        "config": {
+          "alpha": "discard",
+          "bitrate": 30000000,
+          "bitrateMode": "variable",
+          "codec": "av01.0.08M.08",
+          "contentHint": "",
+          "framerate": 30,
+          "hardwareAcceleration": "no-preference",
+          "height": 1080,
+          "latencyMode": "quality",
+          "width": 1920
+        },
+        "supported": true
+      },
+      "h265": {
+        "config": {
+          "alpha": "discard",
+          "bitrate": 30000000,
+          "bitrateMode": "variable",
+          "codec": "hvc1.1.6.L120.B0",
+          "contentHint": "",
+          "framerate": 30,
+          "hardwareAcceleration": "no-preference",
+          "height": 1080,
+          "latencyMode": "quality",
+          "width": 1920
+        },
+        "supported": false
+      }
+    }
+  },
+  "cef": {
+    "available": false,
+    "eligibleForPromotion": false,
+    "reason": "CEF frame/surface integration requires a platform-specific bridge and correctness tests."
+  }
+}

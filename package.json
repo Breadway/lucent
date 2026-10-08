@@ -1,0 +1,32 @@
+{
+  "name": "@breadway/lucent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "lucent": "cli.mjs"
+  },
+  "exports": {
+    ".": "./sdk/index.js"
+  },
+  "scripts": {
+    "test": "node --test tests/*.test.mjs",
+    "test:integration": "FILM_INTEGRATION=1 FILM_NATIVE=1 node --test --test-concurrency=1 tests/*.test.mjs",
+    "typecheck": "tsc --noEmit",
+    "build:native": "cargo build --locked",
+    "test:tts": "python3 -m unittest discover -s tests -p 'test_*.py'",
+    "build": "cargo build --release --locked",
+    "bench:capture": "node tools/run-capture-pair.mjs",
+    "bench:native": "node tools/run-native-benchmark.mjs"
+  },
+  "dependencies": {
+    "esbuild": "0.25.12",
+    "fontkit": "^2.0.4",
+    "pngjs": "7.0.0",
+    "puppeteer-core": "25.12.0"
+  },
+  "devDependencies": {
+    "prettier": "^3.6.2",
+    "typescript": "5.9.3"
+  }
+}

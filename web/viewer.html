@@ -1,0 +1,611 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Lucent</title>
+    <link rel="icon" href="data:," />
+    <style>
+      :root {
+        --bg: #080c14;
+        --panel: #0e1522;
+        --panel-2: #141e30;
+        --line: #1f2c3e;
+        --line-2: #2b3b52;
+        --text: #eef3f9;
+        --muted: #9aabc1;
+        --faint: #6b7f99;
+        --accent: #7be3d5;
+        --accent-2: #b6a1ff;
+        --danger: #ff7a8a;
+        color-scheme: dark;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: var(--bg);
+        color: var(--text);
+        font:
+          14px/1.4 Inter,
+          system-ui,
+          -apple-system,
+          "Segoe UI",
+          sans-serif;
+      }
+      #app {
+        display: flex;
+        flex-direction: column;
+        height: 100vh;
+        height: 100dvh;
+        background: var(--bg);
+      }
+      #viewport {
+        position: relative;
+        flex: 1;
+        min-height: 0;
+        background: #000;
+        overflow: hidden;
+        cursor: pointer;
+      }
+      iframe,
+      video {
+        display: block;
+        border: 0;
+        width: 100%;
+        height: 100%;
+        background: #000;
+      }
+      /* Play/pause feedback and the loading veil sit above the film. */
+      #flash {
+        position: absolute;
+        left: 50%;
+        top: 50%;
+        width: 84px;
+        height: 84px;
+        margin: -42px 0 0 -42px;
+        border-radius: 50%;
+        display: grid;
+        place-items: center;
+        background: rgb(8 12 20 / 0.62);
+        backdrop-filter: blur(6px);
+        opacity: 0;
+        transform: scale(0.8);
+        pointer-events: none;
+      }
+      #flash.on {
+        animation: flash 0.55s ease-out;
+      }
+      #flash svg {
+        width: 36px;
+        height: 36px;
+      }
+      @keyframes flash {
+        0% {
+          opacity: 0.95;
+          transform: scale(0.8);
+        }
+        100% {
+          opacity: 0;
+          transform: scale(1.25);
+        }
+      }
+      #veil {
+        position: absolute;
+        inset: 0;
+        display: grid;
+        place-items: center;
+        background: rgb(4 7 12 / 0.78);
+        font-size: 15px;
+        color: var(--muted);
+        pointer-events: none;
+        transition: opacity 0.25s;
+      }
+      #veil[hidden] {
+        display: none;
+      }
+      #veil.error {
+        color: var(--danger);
+      }
+      #veil span::before {
+        content: "";
+        display: inline-block;
+        width: 14px;
+        height: 14px;
+        margin-right: 10px;
+        vertical-align: -2px;
+        border: 2px solid var(--line-2);
+        border-top-color: var(--accent);
+        border-radius: 50%;
+        animation: spin 0.8s linear infinite;
+      }
+      #veil.error span::before {
+        display: none;
+      }
+      @keyframes spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+
+      #caption {
+        min-height: 64px;
+        padding: 12px 24px;
+        display: grid;
+        place-items: center;
+        text-align: center;
+        font-size: clamp(16px, 1.55vw, 24px);
+        font-weight: 560;
+        line-height: 1.35;
+        letter-spacing: -0.01em;
+        background: #05080e;
+        border-top: 1px solid var(--line);
+        white-space: pre-wrap;
+      }
+      #caption:empty::before {
+        content: "";
+      }
+      #caption[hidden],
+      #caption.off {
+        display: none;
+      }
+
+      #bar {
+        background: var(--panel);
+        border-top: 1px solid var(--line);
+        padding: 0 16px 10px;
+        transition:
+          transform 0.25s,
+          opacity 0.25s;
+      }
+      #track {
+        position: relative;
+        height: 28px;
+        margin: 0 -2px;
+        touch-action: none;
+      }
+      #track .rail,
+      #track #fill {
+        position: absolute;
+        left: 0;
+        top: 12px;
+        height: 4px;
+        border-radius: 2px;
+        pointer-events: none;
+      }
+      #track .rail {
+        right: 0;
+        background: var(--line-2);
+      }
+      #track #fill {
+        width: 0;
+        background: linear-gradient(90deg, var(--accent), var(--accent-2));
+      }
+      #ticks i {
+        position: absolute;
+        top: 10px;
+        width: 2px;
+        height: 8px;
+        margin-left: -1px;
+        border-radius: 1px;
+        background: var(--bg);
+        pointer-events: none;
+      }
+      #scrub {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        margin: 0;
+        opacity: 0;
+        cursor: pointer;
+      }
+      #thumb {
+        position: absolute;
+        top: 8px;
+        width: 12px;
+        height: 12px;
+        margin-left: -6px;
+        border-radius: 50%;
+        background: var(--text);
+        box-shadow: 0 0 0 4px rgb(123 227 213 / 0.18);
+        pointer-events: none;
+        transition: transform 0.12s;
+      }
+      #track:hover #thumb,
+      #track:focus-within #thumb {
+        transform: scale(1.25);
+      }
+      #track:hover .rail,
+      #track:hover #fill {
+        top: 11px;
+        height: 6px;
+        border-radius: 3px;
+      }
+      #tip {
+        position: absolute;
+        bottom: 32px;
+        padding: 4px 9px;
+        border: 1px solid var(--line-2);
+        border-radius: 7px;
+        background: var(--panel-2);
+        color: var(--text);
+        font-size: 12px;
+        white-space: nowrap;
+        pointer-events: none;
+        opacity: 0;
+        transition: opacity 0.1s;
+        transform: translateX(-50%);
+      }
+      #tip.on {
+        opacity: 1;
+      }
+      #tip small {
+        color: var(--muted);
+        margin-left: 6px;
+      }
+
+      .row {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        flex-wrap: wrap;
+      }
+      .group {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+      .group.right {
+        margin-left: auto;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+      }
+      button,
+      select,
+      .file {
+        font: inherit;
+        color: var(--text);
+        background: var(--panel-2);
+        border: 1px solid var(--line-2);
+        border-radius: 8px;
+        height: 34px;
+      }
+      button {
+        display: inline-grid;
+        place-items: center;
+        min-width: 34px;
+        padding: 0 8px;
+        cursor: pointer;
+        transition:
+          background 0.12s,
+          border-color 0.12s;
+      }
+      button svg {
+        width: 18px;
+        height: 18px;
+        fill: currentColor;
+      }
+      button:hover:not(:disabled),
+      select:hover:not(:disabled),
+      .file:hover {
+        background: #1a2840;
+        border-color: #3b5373;
+      }
+      button:disabled,
+      select:disabled {
+        opacity: 0.4;
+        cursor: not-allowed;
+      }
+      button:focus-visible,
+      select:focus-visible,
+      #scrub:focus-visible,
+      #volume:focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: 2px;
+      }
+      #play {
+        width: 40px;
+        height: 40px;
+        border-radius: 50%;
+        background: var(--accent);
+        border-color: var(--accent);
+        color: #06121a;
+      }
+      #play:hover:not(:disabled) {
+        background: #9cf0e4;
+        border-color: #9cf0e4;
+      }
+      #play svg {
+        width: 20px;
+        height: 20px;
+      }
+      button[aria-pressed="true"] {
+        color: var(--accent);
+        border-color: #2f6f68;
+        background: #112a2b;
+      }
+      #time {
+        min-width: 112px;
+        padding-left: 6px;
+        color: var(--muted);
+        font:
+          13px ui-monospace,
+          "JetBrains Mono",
+          Menlo,
+          monospace;
+        font-variant-numeric: tabular-nums;
+      }
+      #time b {
+        color: var(--text);
+        font-weight: 600;
+      }
+      select {
+        padding: 0 8px;
+        max-width: 240px;
+      }
+      #volume {
+        width: 84px;
+        accent-color: var(--accent);
+      }
+      .file {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 0 10px;
+        color: var(--muted);
+        cursor: pointer;
+      }
+      .file input {
+        display: none;
+      }
+      .file svg {
+        width: 16px;
+        height: 16px;
+        fill: currentColor;
+      }
+      #status {
+        margin-top: 8px;
+        min-height: 18px;
+        font-size: 12px;
+        color: var(--faint);
+      }
+      #status.error {
+        color: var(--danger);
+      }
+
+      /* Fullscreen shows the whole player; controls fade out while playing. */
+      #app:fullscreen #viewport {
+        flex: 1;
+      }
+      #app.idle {
+        cursor: none;
+      }
+      #app.idle #bar,
+      #app.idle #caption.off {
+        opacity: 0;
+        transform: translateY(8px);
+        pointer-events: none;
+      }
+      #help {
+        position: absolute;
+        inset: 0;
+        display: grid;
+        place-items: center;
+        background: rgb(4 7 12 / 0.82);
+        z-index: 3;
+      }
+      #help[hidden] {
+        display: none;
+      }
+      #help dl {
+        margin: 0;
+        padding: 22px 28px;
+        display: grid;
+        grid-template-columns: auto auto;
+        align-items: baseline;
+        gap: 8px 22px;
+        border: 1px solid var(--line-2);
+        border-radius: 14px;
+        background: var(--panel);
+      }
+      #help dt {
+        font:
+          12px ui-monospace,
+          monospace;
+        color: var(--accent);
+        text-align: right;
+      }
+      #help dd {
+        margin: 0;
+        color: var(--muted);
+      }
+      #help h2 {
+        grid-column: 1 / -1;
+        margin: 0 0 6px;
+        font-size: 15px;
+      }
+      @media (max-width: 760px) {
+        .row {
+          gap: 8px;
+        }
+        #volume,
+        .file span {
+          display: none;
+        }
+        .group.right {
+          margin-left: 0;
+          width: 100%;
+          justify-content: flex-start;
+        }
+        select {
+          max-width: 150px;
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        * {
+          animation: none !important;
+          transition: none !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app">
+      <main id="viewport" aria-label="Film">
+        <iframe id="film" title="Coded film"></iframe>
+        <video id="export" hidden controls></video>
+        <div id="flash" aria-hidden="true"></div>
+        <div id="veil"><span id="veiltext">Loading film…</span></div>
+        <div id="help" hidden>
+          <dl>
+            <h2>Keyboard shortcuts</h2>
+            <dt>Space / K</dt>
+            <dd>Play or pause</dd>
+            <dt>← →</dt>
+            <dd>Step one frame (Shift: 5 s)</dd>
+            <dt>J / L</dt>
+            <dd>Back / forward 10 s</dd>
+            <dt>PgUp / PgDn</dt>
+            <dd>Previous / next chapter</dd>
+            <dt>Home / End</dt>
+            <dd>Start / end</dd>
+            <dt>0–9</dt>
+            <dd>Jump to 0–90%</dd>
+            <dt>C</dt>
+            <dd>Captions</dd>
+            <dt>M</dt>
+            <dd>Mute</dd>
+            <dt>F</dt>
+            <dd>Fullscreen</dd>
+            <dt>?</dt>
+            <dd>This help</dd>
+          </dl>
+        </div>
+      </main>
+      <div id="caption" aria-live="off"></div>
+      <footer id="bar">
+        <div id="track">
+          <div class="rail"></div>
+          <div id="fill"></div>
+          <div id="ticks"></div>
+          <div id="thumb"></div>
+          <input
+            id="scrub"
+            aria-label="Timeline"
+            type="range"
+            min="0"
+            max="1"
+            step="0.001"
+            value="0"
+          />
+          <div id="tip" role="presentation"></div>
+        </div>
+        <div class="row">
+          <div class="group">
+            <button
+              id="play"
+              aria-label="Play"
+              title="Play (Space)"
+              disabled
+            ></button>
+            <button
+              id="prev"
+              aria-label="Previous chapter"
+              title="Previous chapter (PgUp)"
+              disabled
+            ></button>
+            <button
+              id="back"
+              aria-label="Back 10 seconds"
+              title="Back 10 s (J)"
+              disabled
+            ></button>
+            <button
+              id="fwd"
+              aria-label="Forward 10 seconds"
+              title="Forward 10 s (L)"
+              disabled
+            ></button>
+            <button
+              id="next"
+              aria-label="Next chapter"
+              title="Next chapter (PgDn)"
+              disabled
+            ></button>
+            <span id="time" aria-live="off">0:00 / 0:00</span>
+          </div>
+          <div class="group">
+            <select
+              id="chapter"
+              aria-label="Chapter"
+              title="Jump to a chapter"
+            ></select>
+          </div>
+          <div class="group right">
+            <select
+              id="pacing"
+              hidden
+              aria-label="Pacing"
+              title="Pacing"
+            ></select>
+            <select
+              id="speed"
+              aria-label="Playback speed"
+              title="Playback speed"
+            >
+              <option value="0.5">0.5×</option>
+              <option value="0.75">0.75×</option>
+              <option value="1" selected>1×</option>
+              <option value="1.25">1.25×</option>
+              <option value="1.5">1.5×</option>
+              <option value="2">2×</option>
+            </select>
+            <select id="fps" aria-label="Frame rate" title="Preview frame rate">
+              <option value="60">60 fps</option>
+              <option value="30">30 fps</option>
+            </select>
+            <button
+              id="captions"
+              aria-pressed="true"
+              aria-label="Captions"
+              title="Captions (C)"
+            ></button>
+            <button id="mute" aria-label="Mute" title="Mute (M)"></button>
+            <input
+              id="volume"
+              aria-label="Volume"
+              type="range"
+              min="0"
+              max="1"
+              step=".01"
+              value=".85"
+            />
+            <button
+              id="fullscreen"
+              aria-label="Fullscreen"
+              title="Fullscreen (F)"
+            ></button>
+            <label
+              class="file"
+              title="Play a rendered video file instead of the live film"
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path
+                  d="M10 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-8z"
+                />
+              </svg>
+              <span>Open export</span>
+              <input id="file" type="file" accept="video/*" />
+            </label>
+          </div>
+        </div>
+        <div id="status" role="status">Loading…</div>
+      </footer>
+    </div>
+    <audio id="audio"></audio>
+    <script type="module" src="/engine/web/viewer.js"></script>
+  </body>
+</html>

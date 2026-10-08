@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "apiVersion": "0.1.0",
+  "id": "svg-example",
+  "renderer": "portable",
+  "adapter": "scenegraph",
+  "entry": "film.ts",
+  "design": { "width": 640, "height": 360 },
+  "fonts": [{ "family": "DejaVu Sans", "file": "DejaVuSans.ttf", "weight": 400 }],
+  "dependencies": ["DejaVuSans.ttf"]
+}

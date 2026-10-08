@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "fixture": "examples/conformance/conformance.film.json",
+  "settings": {
+    "resolution": [1920, 1080],
+    "fps": 30,
+    "frames": 60,
+    "codec": "h264",
+    "encoder": "auto, VAAPI selected when available; software fallback allowed",
+    "workers": 1,
+    "range": [1, 3]
+  },
+  "environment": {
+    "browserVersion": "HeadlessChrome/153.0.8010.12",
+    "node": "v22.23.3",
+    "platform": "linux",
+    "arch": "x64",
+    "cpus": "AMD Ryzen AI 7 350 w/ Radeon 860M",
+    "logicalCpus": 16,
+    "ffmpeg": "ffmpeg version n9.0.2 Copyright (c) 2000-2026 the FFmpeg developers",
+    "acceleration": {
+      "webgl": true,
+      "webgl2": true,
+      "linearFloatTargets": true,
+      "maxTextureDimension": 8192,
+      "webgpu": true,
+      "renderer": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (Subzero) (0x0000C0DE)), SwiftShader driver)",
+      "webcodecs": true
+    }
+  },
+  "hardwareAcceleration": {
+    "encoding": true,
+    "graphics": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (Subzero) (0x0000C0DE)), SwiftShader driver)",
+    "graphicsActive": false
+  },
+  "png": {
+    "wallClockSeconds": [19.463087, 18.016891, 18.417721],
+    "medianWallClockSeconds": 18.417721039,
+    "steadyStateFps": [3.2003585062080955, 3.466710536255297, 3.389932892491838]
+  },
+  "rgba": {
+    "wallClockSeconds": [40.492383, 39.606553, 41.510986],
+    "medianWallClockSeconds": 40.492382694,
+    "steadyStateFps": [
+      1.5098087533148477, 1.5438244356863757, 1.4730286451387873
+    ]
+  },
+  "endToEndThroughputChange": -0.5451559080091115,
+  "eligibleForPromotion": false,
+  "reason": "One portable demo and Chromium SwiftShader; end-to-end throughput regressed. The full nasty-scene suite was not run."
+}

@@ -1,0 +1,85 @@
+{
+  "schemaVersion": 1,
+  "environment": "Chromium headless CPU",
+  "passed": true,
+  "results": [
+    {
+      "project": "astra",
+      "scenes": 23,
+      "deterministic": true,
+      "failures": []
+    },
+    {
+      "project": "edu",
+      "scenes": 83,
+      "deterministic": true,
+      "failures": []
+    },
+    {
+      "project": "board",
+      "scenes": 10,
+      "deterministic": true,
+      "failures": []
+    },
+    {
+      "project": "bos-vertical",
+      "scenes": 8,
+      "deterministic": true,
+      "failures": []
+    },
+    {
+      "project": "bos",
+      "scenes": 9,
+      "deterministic": true,
+      "failures": []
+    },
+    {
+      "project": "bos2",
+      "scenes": 9,
+      "deterministic": true,
+      "failures": []
+    },
+    {
+      "project": "bos3-vertical",
+      "scenes": 8,
+      "deterministic": true,
+      "failures": []
+    },
+    {
+      "project": "bos3",
+      "scenes": 9,
+      "deterministic": true,
+      "failures": []
+    },
+    {
+      "project": "bos4-vertical",
+      "scenes": 8,
+      "deterministic": true,
+      "failures": []
+    },
+    {
+      "project": "bos4",
+      "scenes": 9,
+      "deterministic": true,
+      "failures": []
+    },
+    {
+      "project": "comictest",
+      "scenes": 5,
+      "deterministic": true,
+      "failures": []
+    },
+    {
+      "project": "private",
+      "scenes": 24,
+      "deterministic": true,
+      "failures": []
+    },
+    {
+      "project": "public",
+      "scenes": 10,
+      "deterministic": true,
+      "failures": []
+    }
+  ]
+}

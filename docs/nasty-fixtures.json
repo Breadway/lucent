@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "fixtures": [
+    {
+      "project": "../astra-films/edu.film.json",
+      "scene": "attention",
+      "features": [
+        "dom",
+        "svg",
+        "dense-text",
+        "educational-diagrams",
+        "overlaps"
+      ]
+    },
+    {
+      "project": "../breadway-film-projects/private.film.json",
+      "scene": "wedding",
+      "features": [
+        "canvas",
+        "large-images",
+        "typography",
+        "bloom",
+        "grain",
+        "overlaps"
+      ]
+    },
+    {
+      "project": "../breadway-film-projects/bos4.film.json",
+      "scene": "apps",
+      "features": ["image-sequences", "postprocessing", "motion-blur"]
+    },
+    {
+      "project": "examples/conformance/conformance.film.json",
+      "scene": "operations",
+      "features": [
+        "portable-transforms",
+        "clipping",
+        "paths",
+        "text",
+        "camera",
+        "image",
+        "video",
+        "overlaps"
+      ]
+    }
+  ],
+  "clipSeconds": 4,
+  "fps": "30",
+  "codecs": ["av1", "h265", "h264"],
+  "resolutions": ["1080p", "4k"],
+  "workers": [1, 2],
+  "motionBlurSamples": [1, 4],
+  "repetitions": 3,
+  "promotion": "Compare repeated complete exports with equivalent settings, all required deliverables, feature coverage and colour/conformance checks. Capture-only timing cannot qualify a path."
+}
