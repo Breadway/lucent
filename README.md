@@ -9,9 +9,9 @@ From ~/Projects/lucent:
     npm install
     npm run typecheck
     npm run build
-    node cli.mjs inspect ../astra-films/astra.film.json --json
-    node cli.mjs preview ../astra-films/astra.film.json
-    node cli.mjs render ../astra-films/astra.film.json --size 1080p --codec av1,h265,h264 --software-fallback
+    node cli.mjs inspect ../lucent-films/astra-films/astra.film.json --json
+    node cli.mjs preview ../lucent-films/astra-films/astra.film.json
+    node cli.mjs render ../lucent-films/astra-films/astra.film.json --size 1080p --codec av1,h265,h264 --software-fallback
 
 The first native build needs Rust/Cargo. Rendering also needs Chromium and FFmpeg with zscale and the requested encoders. Lucent probes the requested encoder at the requested size before rendering. Software fallback must be explicitly enabled. Final exports go to ~/Videos/Breadway Films; checkpoints go to ~/.cache/lucent.
 
@@ -41,9 +41,15 @@ CPU transfer uses top-left, tightly packed, premultiplied linear BT.709 RGBA16F.
 
 bench --json reports complete export time, steady-state FPS, render factor, stage timings, system/software, memory and observed acceleration. On the conformance film at 1080p, the native renderer completed three 60-frame H.264 exports in a median 10.43s, compared with 18.42s for Chromium on this system. The raw VideoFrame path took 40.49s. Native rendering is promising for portable scenes, but one fixture does not meet the representative-suite promotion gate. See the machine-readable reports in docs/benchmarks/ and docs/capture-evaluation.json.
 
-## Migrated projects
+## Film projects
 
-- ../astra-films contains Astra and education scenes, assets, fonts and available narration/audio.
-- ../breadway-film-projects contains Breadway films, assets, fonts, data and player resources.
+All film projects live in `../lucent-films` (moved there from the old
+top-level `../astra-films`, `../breadway-film-projects` and
+`../omnia-nano-explainer` checkouts):
+
+- `lucent-films/astra-films` contains Astra and education scenes, assets, fonts and available narration/audio.
+- `lucent-films/breadway-film-projects` contains Breadway films, assets, fonts, data and player resources.
+- `lucent-films/omnia-nano-explainer` contains the OmniAstra nano explainer (word-anchored scenes, TTS narration).
+- `lucent-films/bos-trailer` contains the BOS trailer rewritten as a portable native Lucent film.
 
 Original source repositories remain intact. The migrated film folders hold their own manifests and use Lucent compatibility code from outside the film projects.

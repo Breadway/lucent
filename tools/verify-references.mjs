@@ -4,7 +4,7 @@ import { PNG } from "pngjs";
 import { project, atomicJSON } from "../src/project.mjs";
 import { openFilm } from "../src/browser.mjs";
 const results = [];
-for (const root of ["../astra-films", "../breadway-film-projects"])
+for (const root of ["../lucent-films/astra-films", "../lucent-films/breadway-film-projects"])
   for (const name of fs
     .readdirSync(root)
     .filter((n) => n.endsWith(".film.json"))) {

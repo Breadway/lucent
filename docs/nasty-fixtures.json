@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "fixtures": [
     {
-      "project": "../astra-films/edu.film.json",
+      "project": "../lucent-films/astra-films/edu.film.json",
       "scene": "attention",
       "features": [
         "dom",
@@ -13,7 +13,7 @@
       ]
     },
     {
-      "project": "../breadway-film-projects/private.film.json",
+      "project": "../lucent-films/breadway-film-projects/private.film.json",
       "scene": "wedding",
       "features": [
         "canvas",
@@ -25,7 +25,7 @@
       ]
     },
     {
-      "project": "../breadway-film-projects/bos4.film.json",
+      "project": "../lucent-films/breadway-film-projects/bos4.film.json",
       "scene": "apps",
       "features": ["image-sequences", "postprocessing", "motion-blur"]
     },

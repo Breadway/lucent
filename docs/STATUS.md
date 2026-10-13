@@ -1,6 +1,6 @@
 # Lucent implementation status
 
-Lucent keeps film code and media in ../astra-films and ../breadway-film-projects. Original sources were preserved. The migration report covers all 13 manifests and every scene's start, middle and end samples. Two educational HUD samples differ in text-edge compositing; the bounded differences are documented in CONTRACTS.md and do not widen generic tolerances.
+Lucent keeps film code and media in ../lucent-films/astra-films and ../lucent-films/breadway-film-projects. Original sources were preserved. The migration report covers all 13 manifests and every scene's start, middle and end samples. Two educational HUD samples differ in text-edge compositing; the bounded differences are documented in CONTRACTS.md and do not widen generic tolerances.
 
 The JS/TS SDK, Chromium adapters, QuickJS/wgpu renderer, native coded-film viewer, ffplay export playback, versioned manifests, project-local extension contract, dependency-based cache, Gemini quota ledger, timestamped narration assembler, procedural audio providers, BT.709 encoder and checkpoint recovery are implemented. TypeScript is bundled to JavaScript before QuickJS runs. Arbitrary DOM and Canvas scenes remain browser-only, except Astra-style DOM/SVG films, which can run natively through the `svg` leaf and the DOM shim in `compat/astra/native` (see docs/svg-node.md).
 

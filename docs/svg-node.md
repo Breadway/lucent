@@ -45,7 +45,7 @@ export default createAstraFilm({
 ```
 
 `/engine/...` imports resolve to this repository, as they do for the browser adapter. See
-`astra-films/edu-native/` (Astra Film 2) for a complete project, including how its fonts are
+`lucent-films/astra-films/edu-native/` (Astra Film 2) for a complete project, including how its fonts are
 prepared. `inspect` always opens a browser, so use `build --backend native` and `render --backend
 native` for these films.
 

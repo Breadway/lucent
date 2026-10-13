@@ -3,7 +3,7 @@ import path from "node:path";
 import { PNG } from "pngjs";
 import { project, atomicJSON } from "../src/project.mjs";
 import { openFilm } from "../src/browser.mjs";
-const roots = ["../astra-films", "../breadway-film-projects"];
+const roots = ["../lucent-films/astra-films", "../lucent-films/breadway-film-projects"];
 const results = [];
 for (const root of roots)
   for (const name of fs

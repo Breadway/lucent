@@ -1,6 +1,6 @@
 # Capability inventory
 
-The engine preserves the originals through browser compatibility adapters. Film collections are stored in `../astra-films` and `../breadway-film-projects`; they do not contain a copy of the reusable engine.
+The engine preserves the originals through browser compatibility adapters. Film collections are stored in `../lucent-films/astra-films` and `../lucent-films/breadway-film-projects`; they do not contain a copy of the reusable engine.
 
 | Capability                                                                 | Source         | Engine interface                                    |
 | -------------------------------------------------------------------------- | -------------- | --------------------------------------------------- |
