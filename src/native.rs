@@ -19,13 +19,25 @@ use tiny_skia::{FillRule, Mask, Paint, PathBuilder, Pixmap, Rect, Stroke, Transf
 
 const SHADER: &str = r#"
 @group(0) @binding(0) var picture: texture_2d<f32>;
+@group(0) @binding(1) var<uniform> params: Params;
+struct Params { opacity: f32, _pad0: f32, _pad1: f32, _pad2: f32 };
 struct Output { @builtin(position) position: vec4<f32> };
 @vertex fn vs(@builtin(vertex_index) id: u32) -> Output {
  var p=array<vec2<f32>,3>(vec2(-1.,-1.),vec2(3.,-1.),vec2(-1.,3.));
  var o: Output; o.position=vec4(p[id],0.,1.); return o;
 }
+fn to_linear(c: f32) -> f32 {
+ return select(pow((c + 0.055) / 1.055, 2.4), c / 12.92, c <= 0.04045);
+}
 @fragment fn fs(in: Output)->@location(0) vec4<f32> {
- return textureLoad(picture,vec2<i32>(in.position.xy),0);
+ let texel=textureLoad(picture,vec2<i32>(in.position.xy),0);
+ let a=texel.a;
+ if (a <= 0.0) { return vec4<f32>(0.0); }
+ // Unpremultiply in sRGB (as the old CPU table did), linearise, re-premultiply.
+ let srgb=min(texel.rgb / a, vec3<f32>(1.0));
+ let lin=vec3<f32>(to_linear(srgb.r), to_linear(srgb.g), to_linear(srgb.b));
+ let ao=a * params.opacity;
+ return vec4<f32>(lin * ao, ao);
 }
 "#;
 fn v(n: &Value, key: &str, default: f32) -> f32 {
@@ -111,8 +123,6 @@ impl Profile {
     }
 }
 const SYNC_EVERY: u32 = 32;
-/// 1.0 as little-endian f16.
-const ONE_F16: [u8; 2] = [0x00, 0x3c];
 /// Pixel region (left, top, right, bottom), right/bottom exclusive.
 type Region = (u32, u32, u32, u32);
 /// Conservative pixel region covering `bounds` (already in target space), padded for
@@ -153,15 +163,14 @@ struct Gpu {
     device: wgpu::Device,
     queue: wgpu::Queue,
     pipeline: wgpu::RenderPipeline,
+    /// Texture-only layout for film-shader effects.
     layout: wgpu::BindGroupLayout,
+    /// Upload texture plus per-leaf opacity for the composite blit.
+    blit_layout: wgpu::BindGroupLayout,
+    opacity: wgpu::Buffer,
     info: Value,
     /// Reused upload texture and bind group; leaves only write their own region.
     source: Option<(u32, u32, wgpu::Texture, wgpu::BindGroup)>,
-    lut: Vec<f32>,
-    /// `lut` as little-endian f16 bytes, for opaque pixels at full opacity.
-    lut16: Vec<[u8; 2]>,
-    /// linear(c / 255 / a) for every premultiplied (c, a) pair, indexed a * 256 + c.
-    unpremultiplied: Vec<f32>,
     staging: Vec<u8>,
     gpu_wait: Duration,
     pending: u32,
@@ -209,9 +218,43 @@ impl Gpu {
                 label: None,
                 source: wgpu::ShaderSource::Wgsl(SHADER.into()),
             });
+            let blit_layout =
+                device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: None,
+                    entries: &[
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 0,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Texture {
+                                sample_type: wgpu::TextureSampleType::Float {
+                                    filterable: false,
+                                },
+                                view_dimension: wgpu::TextureViewDimension::D2,
+                                multisampled: false,
+                            },
+                            count: None,
+                        },
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 1,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Uniform,
+                                has_dynamic_offset: false,
+                                min_binding_size: None,
+                            },
+                            count: None,
+                        },
+                    ],
+                });
+            let opacity = device.create_buffer(&wgpu::BufferDescriptor {
+                label: None,
+                size: 16,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
             let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: None,
-                bind_group_layouts: &[&layout],
+                bind_group_layouts: &[&blit_layout],
                 push_constant_ranges: &[],
             });
             let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -246,29 +289,23 @@ impl Gpu {
                 queue,
                 pipeline,
                 layout,
+                blit_layout,
+                opacity,
                 info,
                 source: None,
-                lut: (0..256).map(|i| linear(i as f32 / 255.)).collect(),
-                lut16: (0..256)
-                    .map(|i| f16::from_f32(linear(i as f32 / 255.)).to_le_bytes())
-                    .collect(),
-                unpremultiplied: (0..65536u32)
-                    .map(|i| {
-                        let (a, c) = ((i >> 8) as f32 / 255., (i & 255) as f32);
-                        if a == 0. {
-                            0.
-                        } else {
-                            linear((c / 255. / a).min(1.))
-                        }
-                    })
-                    .collect(),
                 staging: Vec::new(),
                 gpu_wait: Duration::ZERO,
                 pending: 0,
             })
         })
     }
-    fn texture(&self, width: u32, height: u32, usage: wgpu::TextureUsages) -> wgpu::Texture {
+    fn texture(
+        &self,
+        width: u32,
+        height: u32,
+        usage: wgpu::TextureUsages,
+        format: wgpu::TextureFormat,
+    ) -> wgpu::Texture {
         self.device.create_texture(&wgpu::TextureDescriptor {
             label: None,
             size: wgpu::Extent3d {
@@ -279,12 +316,13 @@ impl Gpu {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba16Float,
+            format,
             usage,
             view_formats: &[],
         })
     }
-    /// Blend `pixels` (premultiplied RGBA8, sRGB) onto `target` in linear light.
+    /// Upload `pixels` (premultiplied RGBA8, sRGB) for `region`; the blit
+    /// shader linearises and applies the leaf opacity on the GPU.
     /// `region` bounds every non-transparent pixel; nothing outside it is read.
     fn composite(
         &mut self,
@@ -301,51 +339,37 @@ impl Gpu {
         let rw = right - left;
         let rh = bottom - top;
         self.staging.clear();
-        self.staging.reserve((rw * rh * 8) as usize);
+        self.staging.reserve((rw * rh * 4) as usize);
         for y in top..bottom {
             let row = ((y * width + left) * 4) as usize;
-            for px in data[row..row + (rw * 4) as usize].chunks_exact(4) {
-                if px[3] == 255 && opacity == 1. {
-                    // Opaque at full opacity: the f16 of each channel is a table lookup.
-                    for &c in &px[..3] {
-                        self.staging.extend_from_slice(&self.lut16[c as usize]);
-                    }
-                    self.staging.extend_from_slice(&ONE_F16);
-                    continue;
-                }
-                let a = px[3] as f32 / 255.;
-                if a == 0. {
-                    self.staging.extend_from_slice(&[0; 8]);
-                    continue;
-                }
-                for &c in &px[..3] {
-                    let value = if a == 1. {
-                        self.lut[c as usize]
-                    } else {
-                        self.unpremultiplied[(px[3] as usize) << 8 | c as usize]
-                    };
-                    self.staging
-                        .extend_from_slice(&f16::from_f32(value * a * opacity).to_le_bytes());
-                }
-                self.staging
-                    .extend_from_slice(&f16::from_f32(a * opacity).to_le_bytes());
-            }
+            self.staging
+                .extend_from_slice(&data[row..row + (rw * 4) as usize]);
         }
+        let mut op = [0u8; 16];
+        op[..4].copy_from_slice(&opacity.to_le_bytes());
+        self.queue.write_buffer(&self.opacity, 0, &op);
         let (w, h) = (width, height);
         if !matches!(&self.source, Some((sw, sh, ..)) if *sw == w && *sh == h) {
             let texture = self.texture(
                 w,
                 h,
                 wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                wgpu::TextureFormat::Rgba8Unorm,
             );
             let view = texture.create_view(&Default::default());
             let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: None,
-                layout: &self.layout,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&view),
-                }],
+                layout: &self.blit_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: self.opacity.as_entire_binding(),
+                    },
+                ],
             });
             self.source = Some((w, h, texture, bind));
         }
@@ -364,7 +388,7 @@ impl Gpu {
             &self.staging,
             wgpu::ImageDataLayout {
                 offset: 0,
-                bytes_per_row: Some(rw * 8),
+                bytes_per_row: Some(rw * 4),
                 rows_per_image: Some(rh),
             },
             wgpu::Extent3d {
@@ -459,6 +483,7 @@ impl Gpu {
             size.width,
             size.height,
             wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+            wgpu::TextureFormat::Rgba16Float,
         );
         let mut commands = self.device.create_command_encoder(&Default::default());
         commands.copy_texture_to_texture(target.as_image_copy(), source.as_image_copy(), size);
@@ -981,6 +1006,7 @@ impl Renderer {
             width,
             height,
             wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            wgpu::TextureFormat::Rgba16Float,
         );
         let view = target.create_view(&Default::default());
         let bg = color(graph["background"].as_str().unwrap_or("#000000"))?;
@@ -1120,7 +1146,7 @@ impl Renderer {
         self.flush_profile();
         png
     }
-    fn flush_profile(&mut self) {
+    pub(crate) fn flush_profile(&mut self) {
         if self.prof.enabled {
             eprintln!("gpu-wait={:.1}ms", self.gpu.gpu_wait.as_secs_f64() * 1e3);
         }

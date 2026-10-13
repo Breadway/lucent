@@ -334,18 +334,29 @@ pub fn preview_bench(
         let graph = graph_at(timestamp(i))?;
         let _ = renderer.preview(&graph, width, height, &manifest["design"], "fit")?;
     }
+    renderer.flush_profile();
     let start = Instant::now();
+    let mut js_secs = 0f64;
     for i in 0..frames {
+        let t = Instant::now();
         let graph = graph_at(timestamp(i))?;
+        js_secs += t.elapsed().as_secs_f64();
         let _ = renderer.preview(&graph, width, height, &manifest["design"], "fit")?;
     }
     let preview_secs = start.elapsed().as_secs_f64();
+    let preview_js = js_secs;
+    renderer.flush_profile();
     let start = Instant::now();
+    let mut js_secs = 0f64;
     for i in 0..frames {
+        let t = Instant::now();
         let graph = graph_at(timestamp(i))?;
+        js_secs += t.elapsed().as_secs_f64();
         let _ = renderer.render(&graph, width, height, &manifest["design"], "fit")?;
     }
     let export_secs = start.elapsed().as_secs_f64();
+    let export_js = js_secs;
+    renderer.flush_profile();
     // Frame 0 agreement: same transfer, 8-bit truncation, so at most 1 LSB.
     let graph = graph_at(timestamp(0))?;
     let shown = renderer.preview(&graph, width, height, &manifest["design"], "fit")?;
@@ -367,8 +378,10 @@ pub fn preview_bench(
             "cachesHot": true,
             "previewSecs": preview_secs,
             "previewFps": frames as f64 / preview_secs,
+            "previewJsParseSecs": preview_js,
             "exportSecs": export_secs,
             "exportFps": frames as f64 / export_secs,
+            "exportJsParseSecs": export_js,
             "frame0MaxLsbDiff": max_diff,
         })
     );
