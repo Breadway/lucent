@@ -91,6 +91,93 @@ fn rgba_to_pixmap(image: image::RgbaImage) -> Result<Pixmap> {
     }
     Ok(src)
 }
+/// A short constant-frame-rate clip, fully decoded at first use so every
+/// presentation timestamp is an index lookup instead of an ffmpeg spawn.
+/// Selection matches `-ss` accurate-seek semantics: the first frame covering
+/// the timestamp, verified pixel-identical on the conformance clip.
+struct Clip {
+    fps: f64,
+    frames: Vec<Arc<Pixmap>>,
+}
+/// (width, height, fps, frame count) for clips worth pre-decoding: short,
+/// constant-frame-rate and small enough to hold in RAM. Anything else bails
+/// and the caller keeps per-timestamp seeks.
+fn ffprobe_clip(source: &Path) -> Result<(u32, u32, f64, usize)> {
+    let out = std::process::Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height,avg_frame_rate,r_frame_rate,duration,nb_frames",
+            "-of",
+            "default=noprint_wrappers=1",
+        ])
+        .arg(source)
+        .output()?;
+    if !out.status.success() {
+        bail!("ffprobe failed for {}", source.display());
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let get = |key: &str| -> Result<&str> {
+        text.lines()
+            .find_map(|l| l.strip_prefix(&format!("{key}=")))
+            .context(format!("ffprobe has no {key}"))
+    };
+    let frac = |s: &str| -> Result<f64> {
+        if let Some((a, b)) = s.split_once('/') {
+            let (a, b): (f64, f64) = (a.parse()?, b.parse()?);
+            if b == 0. {
+                bail!("Bad frame rate {s}");
+            }
+            Ok(a / b)
+        } else {
+            Ok(s.parse()?)
+        }
+    };
+    let (w, h): (u32, u32) = (get("width")?.parse()?, get("height")?.parse()?);
+    let (avg, r) = (frac(get("avg_frame_rate")?)?, frac(get("r_frame_rate")?)?);
+    let (dur, n): (f64, usize) = (get("duration")?.parse()?, get("nb_frames")?.parse()?);
+    if !(w > 0 && h > 0) || !avg.is_finite() || avg <= 0. || !dur.is_finite() || dur <= 0. {
+        bail!("Unusable clip metadata");
+    }
+    if (r - avg).abs() > 1e-6
+        || dur > 10.
+        || (n as f64 - dur * avg).abs() > 2f64.max(0.02 * dur * avg)
+    {
+        bail!("Clip is long or variable-frame-rate; seeking per timestamp");
+    }
+    if (w as u64) * (h as u64) * (n as u64) > 32_000_000 {
+        bail!("Clip too large to pre-decode");
+    }
+    Ok((w, h, avg, n))
+}
+fn load_clip(source: &Path) -> Result<Clip> {
+    let (w, h, fps, n) = ffprobe_clip(source)?;
+    let out = std::process::Command::new("ffmpeg")
+        .args(["-v", "error", "-i"])
+        .arg(source)
+        .args(["-f", "rawvideo", "-pix_fmt", "rgba", "-"])
+        .output()?;
+    if !out.status.success() {
+        bail!("Clip decode failed for {}", source.display());
+    }
+    let frame = (w as usize) * (h as usize) * 4;
+    if out.stdout.len() != frame * n {
+        bail!("Clip decode produced an unexpected frame count");
+    }
+    let mut frames = Vec::with_capacity(n);
+    for bytes in out.stdout.chunks_exact(frame) {
+        let image =
+            image::RgbaImage::from_raw(w, h, bytes.to_vec()).context("clip frame")?;
+        frames.push(Arc::new(rgba_to_pixmap(image)?));
+    }
+    if frames.is_empty() {
+        bail!("Clip has no frames");
+    }
+    Ok(Clip { fps, frames })
+}
 /// Opt-in per-stage timing (set LUCENT_PROFILE=1); totals print to stderr after every frame.
 #[derive(Default)]
 struct Profile {
@@ -574,6 +661,9 @@ pub(crate) struct Renderer {
     /// capped at 64 entries; a looped clip would otherwise respawn ffmpeg
     /// for the same timestamps on every pass.
     video: HashMap<(PathBuf, i32), Arc<Pixmap>>,
+    /// Pre-decoded short CFR clips by canonical path; None marks clips that
+    /// failed the pre-decode criteria and keep per-timestamp seeks.
+    clips: HashMap<PathBuf, Option<Arc<Clip>>>,
     svg: Svg,
     svg_fonts: FontDb,
     encode_lut: Vec<u16>,
@@ -587,6 +677,17 @@ impl Renderer {
     /// Fonts shared with scripts (`__measure_text`) so layout and drawing agree.
     pub(crate) fn font_db(&self) -> FontDb {
         self.svg_fonts.clone()
+    }
+    /// Pre-decoded clip for `source`, or None when the clip is long, VFR or
+    /// otherwise unsuitable. Load failures also yield None so rendering falls
+    /// back to per-timestamp seeks instead of failing.
+    fn clip(&mut self, source: &PathBuf) -> Option<Arc<Clip>> {
+        if let Some(hit) = self.clips.get(source) {
+            return hit.clone();
+        }
+        let predecoded = load_clip(source).ok().map(Arc::new);
+        self.clips.insert(source.clone(), predecoded.clone());
+        predecoded
     }
 
     pub(crate) fn new(root: &Path, manifest: &Value) -> Result<Self> {
@@ -617,6 +718,7 @@ impl Renderer {
             scratch: None,
             images: HashMap::new(),
             video: HashMap::new(),
+            clips: HashMap::new(),
             encode_lut: srgb_lut(),
             verify_bbox: env::var_os("LUCENT_VERIFY_BBOX").is_some(),
         })
@@ -874,13 +976,20 @@ impl Renderer {
                         let source = safe_asset(&self.root, file)?;
                         let src: Arc<Pixmap> = if kind == "video" {
                             let time = v(n, "sourceTime", 0.);
-                            // Identical presentation times reuse one decoded frame.
-                            let ms = (time * 1000.).round() as i32;
-                            if let Some(hit) =
-                                self.video.get(&(source.clone(), ms))
-                            {
-                                hit.clone()
+                            // Short CFR clips are fully decoded once; the index
+                            // is the first frame covering the timestamp.
+                            if let Some(clip) = self.clip(&source) {
+                                let len = clip.frames.len() as i64;
+                                let idx = ((time as f64 * clip.fps).floor() as i64)
+                                    .clamp(0, len - 1)
+                                    as usize;
+                                clip.frames[idx].clone()
                             } else {
+                                // Identical presentation times reuse one decoded frame.
+                                let ms = (time * 1000.).round() as i32;
+                                if let Some(hit) = self.video.get(&(source.clone(), ms)) {
+                                    hit.clone()
+                                } else {
                                 let mut decoded = None;
                                 // A requested timestamp can fall just after a VFR clip's last
                                 // presentation timestamp. Walk back by less than a frame on
@@ -923,6 +1032,7 @@ impl Renderer {
                                 }
                                 self.video.insert((source, ms), pixmap.clone());
                                 pixmap
+                            }
                             }
                         } else if let Some(hit) = self.images.get(&source) {
                             hit.clone()
