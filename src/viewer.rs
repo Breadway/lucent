@@ -352,7 +352,7 @@ pub fn preview_bench(
         let t = Instant::now();
         let graph = graph_at(timestamp(i))?;
         js_secs += t.elapsed().as_secs_f64();
-        let _ = renderer.render(&graph, width, height, &manifest["design"], "fit")?;
+        let _ = renderer.sampled(&[graph], width, height, &manifest["design"], "fit", 1)?;
     }
     let export_secs = start.elapsed().as_secs_f64();
     let export_js = js_secs;

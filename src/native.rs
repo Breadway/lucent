@@ -948,28 +948,51 @@ impl Renderer {
                         } else {
                             0.
                         };
-                        buffer.draw(
-                            &mut self.fonts,
-                            &mut self.swash,
-                            Color::rgba(rgba[0], rgba[1], rgba[2], rgba[3]),
-                            |px, py, w, h, c| {
+                        // cosmic-text emits one callback per pixel; batch
+                        // consecutive same-colour pixels of a row into a
+                        // single fill. Pixels are bit-identical to one
+                        // fill per pixel, with far fewer raster calls.
+                        let mut pending: Option<(i32, i32, i32, [u8; 4])> = None;
+                        let mut flush = |pending: &mut Option<(i32, i32, i32, [u8; 4])>| {
+                            if let Some((py, x0, x1, c)) = pending.take() {
                                 let mut p = Paint::default();
-                                p.set_color_rgba8(c.r(), c.g(), c.b(), c.a());
+                                p.set_color_rgba8(c[0], c[1], c[2], c[3]);
                                 if let Some(r) = Rect::from_xywh(
-                                    x + anchor + px as f32,
+                                    x + anchor + x0 as f32,
                                     y - first_baseline + py as f32,
-                                    w as f32,
-                                    h as f32,
+                                    (x1 - x0) as f32,
+                                    1.,
                                 ) {
                                     pix.fill_rect(r, &p, transform, mask.as_deref());
                                     region = union(
                                         region,
-                                        r.transform(transform)
-                                            .and_then(|b| region_of(b, 2., width, height)),
+                                        r.transform(transform).and_then(|b| {
+                                            region_of(b, 2., width, height)
+                                        }),
                                     );
+                                }
+                            }
+                        };
+                        buffer.draw(
+                            &mut self.fonts,
+                            &mut self.swash,
+                            Color::rgba(rgba[0], rgba[1], rgba[2], rgba[3]),
+                            |px, py, _w, _h, c| {
+                                let c = [c.r(), c.g(), c.b(), c.a()];
+                                match &mut pending {
+                                    Some((ry, _, x1, rc))
+                                        if *ry == py && *x1 == px && *rc == c =>
+                                    {
+                                        *x1 = px + 1
+                                    }
+                                    _ => {
+                                        flush(&mut pending);
+                                        pending = Some((py, px, px + 1, c));
+                                    }
                                 }
                             },
                         );
+                        flush(&mut pending);
                     }
                     "image" | "video" => {
                         let file = n["src"].as_str().context("image/video src")?;
@@ -1160,7 +1183,10 @@ impl Renderer {
             .pre_scale(scale, scale)
         };
         self.node(graph, &target, transform, 1., None)?;
-        self.gpu.read(&target)
+        let t_read = Instant::now();
+        let bytes = self.gpu.read(&target)?;
+        self.prof.add("readback", t_read);
+        Ok(bytes)
     }
     pub(crate) fn render(
         &mut self,
@@ -1192,6 +1218,7 @@ impl Renderer {
         fit: &str,
     ) -> Result<Vec<u8>> {
         let bytes = self.render_linear(graph, width, height, design, fit)?;
+        let t_lut = Instant::now();
         let mut out = Vec::with_capacity((width as usize) * (height as usize) * 4);
         for px in bytes.chunks_exact(8) {
             for c in 0..3 {
@@ -1200,9 +1227,10 @@ impl Renderer {
             }
             out.push(255);
         }
+        self.prof.add("preview-lut", t_lut);
         Ok(out)
     }
-    fn sampled(
+    pub(crate) fn sampled(
         &mut self,
         graphs: &[Value],
         width: u32,
@@ -1225,7 +1253,6 @@ impl Renderer {
             let t_encode = Instant::now();
             let png = encode_frame_f16(&bytes, &self.encode_lut, width, height);
             self.prof.add("png-encode", t_encode);
-            self.flush_profile();
             return png;
         }
         let mut sum = vec![0f32; (width * height * 3) as usize];
@@ -1253,7 +1280,6 @@ impl Renderer {
         let t_encode = Instant::now();
         let png = encode_frame(&sum, width, height);
         self.prof.add("png-encode", t_encode);
-        self.flush_profile();
         png
     }
     pub(crate) fn flush_profile(&mut self) {
@@ -1396,6 +1422,7 @@ pub fn server(bundle: &str, manifest: &str) -> Result<()> {
             request["fit"].as_str().unwrap_or("fit"),
             ss,
         )?;
+        renderer.flush_profile();;
         stdout.write_all(&(png.len() as u32).to_le_bytes())?;
         stdout.write_all(&png)?;
         stdout.flush()?;
