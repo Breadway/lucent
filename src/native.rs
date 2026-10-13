@@ -432,6 +432,19 @@ impl Gpu {
             self.staging
                 .extend_from_slice(&data[row..row + (rw * 4) as usize]);
         }
+        self.blit(target, (width, height), region, opacity)
+    }
+    /// Upload staging and draw the fullscreen blit for `region`.
+    fn blit(
+        &mut self,
+        target: &wgpu::Texture,
+        (width, height): (u32, u32),
+        region: Region,
+        opacity: f32,
+    ) -> Result<()> {
+        let (left, top, right, bottom) = region;
+        let rw = right - left;
+        let rh = bottom - top;
         let mut op = [0u8; 16];
         op[..4].copy_from_slice(&opacity.to_le_bytes());
         self.queue.write_buffer(&self.opacity, 0, &op);
@@ -664,6 +677,9 @@ pub(crate) struct Renderer {
     /// Pre-decoded short CFR clips by canonical path; None marks clips that
     /// failed the pre-decode criteria and keep per-timestamp seeks.
     clips: HashMap<PathBuf, Option<Arc<Clip>>>,
+    /// Finished text-leaf rasters by rendering-state hash, captured before
+    /// leaf opacity; static text then skips shaping replay and raster fills.
+    text_cache: HashMap<u64, (Region, Vec<u8>)>,
     svg: Svg,
     svg_fonts: FontDb,
     encode_lut: Vec<u16>,
@@ -688,6 +704,23 @@ impl Renderer {
         let predecoded = load_clip(source).ok().map(Arc::new);
         self.clips.insert(source.clone(), predecoded.clone());
         predecoded
+    }
+    /// Rendering-state hash for a text leaf: node content plus the effective
+    /// transform and output size. Opacity is applied later on the GPU, and
+    /// masked text is never cached, so equal keys rasterise identically.
+    fn text_key(n: &Value, transform: &Transform, width: u32, height: u32) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        serde_json::to_vec(n).unwrap_or_default().hash(&mut h);
+        transform.sx.to_bits().hash(&mut h);
+        transform.kx.to_bits().hash(&mut h);
+        transform.ky.to_bits().hash(&mut h);
+        transform.sy.to_bits().hash(&mut h);
+        transform.tx.to_bits().hash(&mut h);
+        transform.ty.to_bits().hash(&mut h);
+        width.hash(&mut h);
+        height.hash(&mut h);
+        h.finish()
     }
 
     pub(crate) fn new(root: &Path, manifest: &Value) -> Result<Self> {
@@ -719,6 +752,7 @@ impl Renderer {
             images: HashMap::new(),
             video: HashMap::new(),
             clips: HashMap::new(),
+            text_cache: HashMap::new(),
             encode_lut: srgb_lut(),
             verify_bbox: env::var_os("LUCENT_VERIFY_BBOX").is_some(),
         })
@@ -948,51 +982,95 @@ impl Renderer {
                         } else {
                             0.
                         };
-                        // cosmic-text emits one callback per pixel; batch
-                        // consecutive same-colour pixels of a row into a
-                        // single fill. Pixels are bit-identical to one
-                        // fill per pixel, with far fewer raster calls.
-                        let mut pending: Option<(i32, i32, i32, [u8; 4])> = None;
-                        let mut flush = |pending: &mut Option<(i32, i32, i32, [u8; 4])>| {
-                            if let Some((py, x0, x1, c)) = pending.take() {
-                                let mut p = Paint::default();
-                                p.set_color_rgba8(c[0], c[1], c[2], c[3]);
-                                if let Some(r) = Rect::from_xywh(
-                                    x + anchor + x0 as f32,
-                                    y - first_baseline + py as f32,
-                                    (x1 - x0) as f32,
-                                    1.,
-                                ) {
-                                    pix.fill_rect(r, &p, transform, mask.as_deref());
-                                    region = union(
-                                        region,
-                                        r.transform(transform).and_then(|b| {
-                                            region_of(b, 2., width, height)
-                                        }),
+                        // Static text with no clip mask reuses its finished
+                        // raster; the key covers content, transform and
+                        // size, and opacity applies later on the GPU.
+                        let cache_key = mask
+                            .is_none()
+                            .then(|| Self::text_key(n, &transform, width, height));
+                        if let Some((hit_region, hit_bytes)) = cache_key
+                            .and_then(|k| self.text_cache.get(&k).cloned())
+                        {
+                            // Repopulate the scratch region; the shared
+                            // tail composites and clears as usual.
+                            let (l, t, r, b) = hit_region;
+                            let stride = width as usize * 4;
+                            let row_bytes = (r - l) as usize * 4;
+                            let data = pix.data_mut();
+                            for (row, y) in (t as usize..b as usize).enumerate() {
+                                data[y * stride + l as usize * 4
+                                    ..y * stride + r as usize * 4]
+                                    .copy_from_slice(
+                                        &hit_bytes[row * row_bytes..(row + 1) * row_bytes],
+                                    );
+                            }
+                            region = union(region, Some(hit_region));
+                        } else {
+                            // cosmic-text emits one callback per pixel; batch
+                            // consecutive same-colour pixels of a row into a
+                            // single fill. Pixels are bit-identical to one
+                            // fill per pixel, with far fewer raster calls.
+                            let mut pending: Option<(i32, i32, i32, [u8; 4])> = None;
+                            let mut flush = |pending: &mut Option<(i32, i32, i32, [u8; 4])>| {
+                                if let Some((py, x0, x1, c)) = pending.take() {
+                                    let mut p = Paint::default();
+                                    p.set_color_rgba8(c[0], c[1], c[2], c[3]);
+                                    if let Some(r) = Rect::from_xywh(
+                                        x + anchor + x0 as f32,
+                                        y - first_baseline + py as f32,
+                                        (x1 - x0) as f32,
+                                        1.,
+                                    ) {
+                                        pix.fill_rect(r, &p, transform, mask.as_deref());
+                                        region = union(
+                                            region,
+                                            r.transform(transform).and_then(|b| {
+                                                region_of(b, 2., width, height)
+                                            }),
+                                        );
+                                    }
+                                }
+                            };
+                            buffer.draw(
+                                &mut self.fonts,
+                                &mut self.swash,
+                                Color::rgba(rgba[0], rgba[1], rgba[2], rgba[3]),
+                                |px, py, _w, _h, c| {
+                                    let c = [c.r(), c.g(), c.b(), c.a()];
+                                    match &mut pending {
+                                        Some((ry, _, x1, rc))
+                                            if *ry == py && *x1 == px && *rc == c =>
+                                        {
+                                            *x1 = px + 1
+                                        }
+                                        _ => {
+                                            flush(&mut pending);
+                                            pending = Some((py, px, px + 1, c));
+                                        }
+                                    }
+                                },
+                            );
+                            flush(&mut pending);
+                            // Store the finished region for identical frames.
+                            if let (Some(k), Some(reg)) = (cache_key, region) {
+                                let (l, t, r, b) = reg;
+                                let stride = width as usize * 4;
+                                let data = pix.data();
+                                let mut bytes = Vec::with_capacity(
+                                    ((r - l) * (b - t) * 4) as usize,
+                                );
+                                for y in t as usize..b as usize {
+                                    bytes.extend_from_slice(
+                                        &data[y * stride + l as usize * 4
+                                            ..y * stride + r as usize * 4],
                                     );
                                 }
-                            }
-                        };
-                        buffer.draw(
-                            &mut self.fonts,
-                            &mut self.swash,
-                            Color::rgba(rgba[0], rgba[1], rgba[2], rgba[3]),
-                            |px, py, _w, _h, c| {
-                                let c = [c.r(), c.g(), c.b(), c.a()];
-                                match &mut pending {
-                                    Some((ry, _, x1, rc))
-                                        if *ry == py && *x1 == px && *rc == c =>
-                                    {
-                                        *x1 = px + 1
-                                    }
-                                    _ => {
-                                        flush(&mut pending);
-                                        pending = Some((py, px, px + 1, c));
-                                    }
+                                if self.text_cache.len() >= 64 {
+                                    self.text_cache.clear();
                                 }
-                            },
-                        );
-                        flush(&mut pending);
+                                self.text_cache.insert(k, (reg, bytes));
+                            }
+                        }
                     }
                     "image" | "video" => {
                         let file = n["src"].as_str().context("image/video src")?;
@@ -1422,7 +1500,7 @@ pub fn server(bundle: &str, manifest: &str) -> Result<()> {
             request["fit"].as_str().unwrap_or("fit"),
             ss,
         )?;
-        renderer.flush_profile();;
+        renderer.flush_profile();
         stdout.write_all(&(png.len() as u32).to_le_bytes())?;
         stdout.write_all(&png)?;
         stdout.flush()?;
