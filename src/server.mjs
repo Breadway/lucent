@@ -4,7 +4,7 @@ import path from "node:path";
 import * as fontkit from "fontkit";
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { inside } from "./project.mjs";
+import { inside, bundlePath } from "./project.mjs";
 import { narrationTiming } from "./narration.mjs";
 export const ENGINE = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -114,7 +114,7 @@ export function createServer(p) {
       let file = decodeURIComponent(url.pathname),
         root = p.root;
       if (file === "/__film.js") {
-        const bundle = path.join(p.root, ".cache/browser.js");
+        const bundle = bundlePath(p);
         res.setHeader("content-type", "text/javascript");
         return fs.createReadStream(bundle).pipe(res);
       }

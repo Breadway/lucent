@@ -8,6 +8,7 @@ import {
   resolution,
   frameTime,
   cacheKey,
+  bundlePath,
   sceneBackends,
   project,
 } from "../src/project.mjs";
@@ -75,6 +76,42 @@ test("dimensions, unsupported schemas, and shared resource leases fail early", (
       JSON.stringify({ schemaVersion: 2 }),
     );
     assert.throws(() => project(path.join(root, "film.json")), /schemaVersion/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+test("native and browser bundles are keyed by manifest", async () => {
+  const { bundle } = await import("../src/build.mjs");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "film-bundle-"));
+  try {
+    const films = {};
+    for (const name of ["alpha", "beta"]) {
+      fs.writeFileSync(
+        path.join(root, `${name}.js`),
+        `export default { marker: ${JSON.stringify(`${name}-marker`)}, scenes: [] };\n`,
+      );
+      films[name] = {
+        root,
+        entry: `${name}.js`,
+        manifestFile: path.join(root, `${name}.film.json`),
+      };
+    }
+    const outA = await bundle(films.alpha, { native: true });
+    const outB = await bundle(films.beta, { native: true });
+    assert.notEqual(outA, outB);
+    assert.match(path.basename(outA), /^native-alpha-[0-9a-f]{8}\.js$/);
+    assert.match(path.basename(outB), /^native-beta-[0-9a-f]{8}\.js$/);
+    assert.equal(bundlePath(films.alpha, { native: true }), outA);
+    assert.equal(bundlePath(films.beta, { native: true }), outB);
+    const browserA = bundlePath(films.alpha);
+    assert.match(path.basename(browserA), /^browser-alpha-[0-9a-f]{8}\.js$/);
+    assert.notEqual(browserA, outA);
+    const contentsA = fs.readFileSync(outA, "utf8");
+    const contentsB = fs.readFileSync(outB, "utf8");
+    assert.match(contentsA, /alpha-marker/);
+    assert.match(contentsB, /beta-marker/);
+    assert.doesNotMatch(contentsA, /beta-marker/);
+    assert.doesNotMatch(contentsB, /alpha-marker/);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

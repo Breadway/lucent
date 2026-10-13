@@ -190,6 +190,22 @@ export function cacheKey(p, settings, dependencies = sourceFingerprint(p)) {
     settings,
   });
 }
+export function bundlePath(p, { native = false } = {}) {
+  const kind = native ? "native" : "browser";
+  const abs = path.resolve(
+    p.manifestFile || path.join(p.root, p.entry || "film"),
+  );
+  let base = path.basename(abs);
+  if (/\.film\.json$/i.test(base)) base = base.slice(0, -".film.json".length);
+  else if (path.extname(base)) base = base.slice(0, -path.extname(base).length);
+  base = base.replace(/[^A-Za-z0-9_-]+/g, "_").replace(/^_+|_+$/g, "");
+  if (!base) base = "film";
+  return path.join(
+    p.root,
+    ".cache",
+    `${kind}-${base}-${hash(abs).slice(0, 8)}.js`,
+  );
+}
 export function atomicJSON(file, value) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const temp = `${file}.${process.pid}.part`;
