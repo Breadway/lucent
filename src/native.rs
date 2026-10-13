@@ -40,6 +40,28 @@ fn to_linear(c: f32) -> f32 {
  return vec4<f32>(lin * ao, ao);
 }
 "#;
+/// Preview presentation: encode the linear working target to sRGB8 through
+/// the exact CPU transfer table (uploaded once as a 256x256 LUT indexed by
+/// f16 bit pattern; pack2x16float recovers the bits with the same
+/// round-to-nearest-even as the CPU half conversion). Bit-identical to the
+/// CPU LUT walk.
+const POST_SHADER: &str = r#"
+@group(0) @binding(0) var src: texture_2d<f32>;
+@group(0) @binding(1) var lut: texture_2d<u32>;
+struct Output { @builtin(position) position: vec4<f32> };
+@vertex fn vs(@builtin(vertex_index) id: u32) -> Output {
+ var p=array<vec2<f32>,3>(vec2(-1.,-1.),vec2(3.,-1.),vec2(-1.,3.));
+ var o: Output; o.position=vec4(p[id],0.,1.); return o;
+}
+fn encode(v: f32) -> f32 {
+ let bits = pack2x16float(vec2<f32>(v, 0.0)) & 0xffffu;
+ return f32(textureLoad(lut, vec2<u32>(bits & 255u, bits >> 8u), 0).x >> 8u) / 255.0;
+}
+@fragment fn fs(in: Output)->@location(0) vec4<f32> {
+ let px=textureLoad(src,vec2<i32>(in.position.xy),0);
+ return vec4<f32>(encode(px.r), encode(px.g), encode(px.b), 1.0);
+}
+"#;
 fn v(n: &Value, key: &str, default: f32) -> f32 {
     n[key].as_f64().map(|x| x as f32).unwrap_or(default)
 }
@@ -255,6 +277,13 @@ struct Gpu {
     /// Upload texture plus per-leaf opacity for the composite blit.
     blit_layout: wgpu::BindGroupLayout,
     opacity: wgpu::Buffer,
+    /// Preview presentation pipeline (f16 working target to sRGB8).
+    post_pipeline: wgpu::RenderPipeline,
+    post_layout: wgpu::BindGroupLayout,
+    /// sRGB transfer table as 256x256 R16Uint, indexed by f16 bit pattern.
+    lut_tex: wgpu::Texture,
+    /// Reused sRGB8 preview target.
+    preview_tex: Option<(u32, u32, wgpu::Texture)>,
     info: Value,
     /// Reused upload texture and bind group; leaves only write their own region.
     source: Option<(u32, u32, wgpu::Texture, wgpu::BindGroup)>,
@@ -369,6 +398,99 @@ impl Gpu {
                 multiview: None,
                 cache: None,
             });
+            let post_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: None,
+                source: wgpu::ShaderSource::Wgsl(POST_SHADER.into()),
+            });
+            let post_layout =
+                device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: None,
+                    entries: &[
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 0,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Texture {
+                                sample_type: wgpu::TextureSampleType::Float {
+                                    filterable: false,
+                                },
+                                view_dimension: wgpu::TextureViewDimension::D2,
+                                multisampled: false,
+                            },
+                            count: None,
+                        },
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 1,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Texture {
+                                sample_type: wgpu::TextureSampleType::Uint,
+                                view_dimension: wgpu::TextureViewDimension::D2,
+                                multisampled: false,
+                            },
+                            count: None,
+                        },
+                    ],
+                });
+            let post_pipeline_layout =
+                device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: None,
+                    bind_group_layouts: &[&post_layout],
+                    push_constant_ranges: &[],
+                });
+            let post_pipeline =
+                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: None,
+                    layout: Some(&post_pipeline_layout),
+                    vertex: wgpu::VertexState {
+                        module: &post_shader,
+                        entry_point: "vs",
+                        compilation_options: Default::default(),
+                        buffers: &[],
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &post_shader,
+                        entry_point: "fs",
+                        compilation_options: Default::default(),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format: wgpu::TextureFormat::Rgba8Unorm,
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                    }),
+                    primitive: Default::default(),
+                    depth_stencil: None,
+                    multisample: Default::default(),
+                    multiview: None,
+                    cache: None,
+                });
+            let lut = srgb_lut();
+            let lut_tex = device.create_texture(&wgpu::TextureDescriptor {
+                label: None,
+                size: wgpu::Extent3d {
+                    width: 256,
+                    height: 256,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::R16Uint,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            queue.write_texture(
+                lut_tex.as_image_copy(),
+                bytemuck::cast_slice(&lut),
+                wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(512),
+                    rows_per_image: Some(256),
+                },
+                wgpu::Extent3d {
+                    width: 256,
+                    height: 256,
+                    depth_or_array_layers: 1,
+                },
+            );
             let hardware = !matches!(adapter_info.device_type, wgpu::DeviceType::Cpu);
             let info = json!({"available":true,"apiVersion":"0.1.0","features":["groups","transforms","clipping","paths","text","images","cameras","transitions","video","shader-wgsl","supersampling","motion-blur","svg"],"adapter":adapter_info.name,"driver":adapter_info.driver_info,"hardware":hardware,"maxDimensions":limits.max_texture_dimension_2d,"textureFormats":["rgba16float"],"workingBitDepth":16,"rasterization":"Rust tiny-skia/Cosmic Text; linear-light wgpu composition"});
             Ok(Self {
@@ -378,6 +500,10 @@ impl Gpu {
                 layout,
                 blit_layout,
                 opacity,
+                post_pipeline,
+                post_layout,
+                lut_tex,
+                preview_tex: None,
                 info,
                 source: None,
                 staging: Vec::new(),
@@ -392,6 +518,7 @@ impl Gpu {
         height: u32,
         usage: wgpu::TextureUsages,
         format: wgpu::TextureFormat,
+        views: &[wgpu::TextureFormat],
     ) -> wgpu::Texture {
         self.device.create_texture(&wgpu::TextureDescriptor {
             label: None,
@@ -405,7 +532,7 @@ impl Gpu {
             dimension: wgpu::TextureDimension::D2,
             format,
             usage,
-            view_formats: &[],
+            view_formats: views,
         })
     }
     /// Upload `pixels` (premultiplied RGBA8, sRGB) for `region`; the blit
@@ -455,6 +582,7 @@ impl Gpu {
                 h,
                 wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
                 wgpu::TextureFormat::Rgba8Unorm,
+                &[],
             );
             let view = texture.create_view(&Default::default());
             let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -584,6 +712,7 @@ impl Gpu {
             size.height,
             wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
             wgpu::TextureFormat::Rgba16Float,
+            &[],
         );
         let mut commands = self.device.create_command_encoder(&Default::default());
         commands.copy_texture_to_texture(target.as_image_copy(), source.as_image_copy(), size);
@@ -620,9 +749,9 @@ impl Gpu {
         self.device.poll(wgpu::Maintain::Wait);
         Ok(())
     }
-    fn read(&self, target: &wgpu::Texture) -> Result<Vec<u8>> {
+    fn read(&self, target: &wgpu::Texture, bpp: u32) -> Result<Vec<u8>> {
         let size = target.size();
-        let row = (size.width * 8 + 255) & !255;
+        let row = (size.width * bpp + 255) & !255;
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
             size: (row * size.height) as u64,
@@ -650,13 +779,71 @@ impl Gpu {
         self.device.poll(wgpu::Maintain::Wait);
         rx.recv()??;
         let bytes = buffer.slice(..).get_mapped_range();
-        let mut out = Vec::with_capacity((size.width * size.height * 8) as usize);
+        let mut out = Vec::with_capacity((size.width * size.height * bpp) as usize);
         for line in bytes.chunks_exact(row as usize) {
-            out.extend_from_slice(&line[..(size.width * 8) as usize]);
+            out.extend_from_slice(&line[..(size.width * bpp) as usize]);
         }
         drop(bytes);
         buffer.unmap();
         Ok(out)
+    }
+    /// Present the linear f16 `target` as sRGB8 through the exact transfer
+    /// table, returning display bytes with no CPU conversion.
+    fn present(&mut self, target: &wgpu::Texture, width: u32, height: u32) -> Result<Vec<u8>> {
+        if !matches!(&self.preview_tex, Some((w, h, _)) if *w == width && *h == height) {
+            self.preview_tex = Some((
+                width,
+                height,
+                self.texture(
+                    width,
+                    height,
+                    wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                    wgpu::TextureFormat::Rgba8Unorm,
+                    &[],
+                ),
+            ));
+        }
+        let (_, _, shown) = self.preview_tex.as_ref().unwrap();
+        // Plain float view; pack2x16float recovers exact f16 bit patterns.
+        let src_view = target.create_view(&Default::default());
+        let lut_view = self.lut_tex.create_view(&Default::default());
+        let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &self.post_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&src_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&lut_view),
+                },
+            ],
+        });
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        {
+            let shown_view = shown.create_view(&Default::default());
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: None,
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &shown_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.post_pipeline);
+            pass.set_bind_group(0, &bind, &[]);
+            pass.draw(0..3, 0..1);
+        }
+        self.queue.submit(Some(encoder.finish()));
+        self.read(shown, 4)
     }
 }
 pub(crate) struct Renderer {
@@ -1198,14 +1385,14 @@ impl Renderer {
         }
         Ok(())
     }
-    fn render_linear(
+    fn render_target(
         &mut self,
         graph: &Value,
         width: u32,
         height: u32,
         design: &Value,
         fit: &str,
-    ) -> Result<Vec<u8>> {
+    ) -> Result<wgpu::Texture> {
         if width == 0
             || height == 0
             || width > self.gpu.info["maxDimensions"].as_u64().unwrap_or(0) as u32
@@ -1216,8 +1403,11 @@ impl Renderer {
         let target = self.gpu.texture(
             width,
             height,
-            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::COPY_SRC
+                | wgpu::TextureUsages::TEXTURE_BINDING,
             wgpu::TextureFormat::Rgba16Float,
+            &[],
         );
         let view = target.create_view(&Default::default());
         let bg = color(graph["background"].as_str().unwrap_or("#000000"))?;
@@ -1261,8 +1451,19 @@ impl Renderer {
             .pre_scale(scale, scale)
         };
         self.node(graph, &target, transform, 1., None)?;
+        Ok(target)
+    }
+    fn render_linear(
+        &mut self,
+        graph: &Value,
+        width: u32,
+        height: u32,
+        design: &Value,
+        fit: &str,
+    ) -> Result<Vec<u8>> {
+        let target = self.render_target(graph, width, height, design, fit)?;
         let t_read = Instant::now();
-        let bytes = self.gpu.read(&target)?;
+        let bytes = self.gpu.read(&target, 8)?;
         self.prof.add("readback", t_read);
         Ok(bytes)
     }
@@ -1283,10 +1484,9 @@ impl Renderer {
         }
         encode_frame(&values, width, height)
     }
-    /// Preview-only fast path: the same linear working pixels as `render`,
-    /// mapped through the same sRGB transfer to 8-bit for direct display.
-    /// Skips the 16-bit PNG encode (and the caller's PNG decode); export
-    /// pixels are untouched.
+    /// Preview-only fast path: the linear working target is encoded to
+    /// sRGB8 by a GPU presentation pass through the exact transfer table.
+    /// No CPU conversion and no 16-bit readback; export pixels are untouched.
     pub(crate) fn preview(
         &mut self,
         graph: &Value,
@@ -1295,17 +1495,10 @@ impl Renderer {
         design: &Value,
         fit: &str,
     ) -> Result<Vec<u8>> {
-        let bytes = self.render_linear(graph, width, height, design, fit)?;
-        let t_lut = Instant::now();
-        let mut out = Vec::with_capacity((width as usize) * (height as usize) * 4);
-        for px in bytes.chunks_exact(8) {
-            for c in 0..3 {
-                let bits = u16::from_le_bytes([px[c * 2], px[c * 2 + 1]]);
-                out.push((self.encode_lut[bits as usize] >> 8) as u8);
-            }
-            out.push(255);
-        }
-        self.prof.add("preview-lut", t_lut);
+        let target = self.render_target(graph, width, height, design, fit)?;
+        let t_post = Instant::now();
+        let out = self.gpu.present(&target, width, height)?;
+        self.prof.add("preview-post", t_post);
         Ok(out)
     }
     pub(crate) fn sampled(
