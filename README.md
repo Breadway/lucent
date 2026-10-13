@@ -15,7 +15,9 @@ From ~/Projects/lucent:
 
 The first native build needs Rust/Cargo. Rendering also needs Chromium and FFmpeg with zscale and the requested encoders. Lucent probes the requested encoder at the requested size before rendering. Software fallback must be explicitly enabled. Final exports go to ~/Videos/Breadway Films; checkpoints go to ~/.cache/lucent.
 
-Commands: inspect, preview, stills, audio, tts, render, bench and build. Options include --backend browser|native, --size 4k|1440p|1200p|1080p|WIDTHxHEIGHT, --fps 30000/1001, --from SEC --to SEC, --workers 1|2 and --json. Codecs: av1, h265, h264. The play command opens an exported file with ffplay.
+Commands: inspect, preview, stills, audio, tts, render, bench and build. Options include --backend browser|native, --size 4k|1440p|1200p|1080p|WIDTHxHEIGHT, --fps 30000/1001, --from SEC --to SEC, --workers 1|2, --keep-frames and --json. Codecs: av1, h265, h264. The play command opens an exported file with ffplay.
+
+Rendered frame PNGs are deleted as soon as their chunk segment is encoded and verified, so long renders keep only the small segments plus manifests; a resumed render treats a verified segment with pruned frames as done. Pass --keep-frames to retain every captured PNG in the chunk cache.
 
 See PLAN.md, docs/CONTRACTS.md, docs/CAPABILITIES.md and docs/STATUS.md for requirements, interfaces, feature support and current limits.
 

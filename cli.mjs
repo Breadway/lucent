@@ -24,7 +24,13 @@ const args = process.argv.slice(2),
   file = args.shift();
 function options(args) {
   const o = {};
-  const flags = new Set(["json", "cpu", "software-fallback", "force"]);
+  const flags = new Set([
+    "json",
+    "cpu",
+    "software-fallback",
+    "force",
+    "keep-frames",
+  ]);
   const values = new Set(
     "size fps from to workers chunk encoder codec bitrate quality backend capture fit ss mb shutter work out audio times pacing port config script max-requests mode".split(
       " ",
@@ -47,7 +53,7 @@ function options(args) {
 export async function main() {
   if (!command || command === "help" || command === "--help") {
     console.log(
-      "lucent <inspect|preview|render|stills|audio|tts|bench|build> <project.film.json> [--size 1080p|1440p|1200p|4k|WIDTHxHEIGHT] [--codec av1,h265,h264] [--encoder auto|software|vaapi|nvenc|qsv] [--software-fallback] [--from SEC --to SEC] [--backend browser|native] [--json]",
+      "lucent <inspect|preview|render|stills|audio|tts|bench|build> <project.film.json> [--size 1080p|1440p|1200p|4k|WIDTHxHEIGHT] [--codec av1,h265,h264] [--encoder auto|software|vaapi|nvenc|qsv] [--software-fallback] [--from SEC --to SEC] [--backend browser|native] [--keep-frames] [--json]",
     );
     return;
   }
@@ -101,6 +107,7 @@ export async function main() {
     mb: number(o.mb ?? 1, "mb", 1, 32),
     shutter: number(o.shutter ?? 0.5, "shutter", 0, 1),
     cpu: !!o.cpu,
+    keepFrames: !!o["keep-frames"],
     work: o.work ? path.resolve(o.work) : undefined,
     out: o.out ? path.resolve(o.out) : undefined,
     audio: o.audio
