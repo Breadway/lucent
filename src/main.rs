@@ -36,6 +36,13 @@ fn main() -> Result<()> {
             args.get(1).context("bundle")?,
             args.get(2).context("manifest")?,
         ),
+        Some("preview-bench") => viewer::preview_bench(
+            args.get(1).context("bundle")?,
+            args.get(2).context("manifest")?,
+            args.get(3).map_or(Ok(120), |s| s.parse().context("frames"))?,
+            args.get(4).map_or(Ok(1920), |s| s.parse().context("width"))?,
+            args.get(5).map_or(Ok(1080), |s| s.parse().context("height"))?,
+        ),
         Some("play") => {
             let file = args.get(1).context("video path")?;
             let status = Command::new("ffplay").args(["-autoexit", file]).status()?;
