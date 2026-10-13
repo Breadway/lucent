@@ -19,13 +19,47 @@ use tiny_skia::{FillRule, Mask, Paint, PathBuilder, Pixmap, Rect, Stroke, Transf
 
 const SHADER: &str = r#"
 @group(0) @binding(0) var picture: texture_2d<f32>;
+@group(0) @binding(1) var<uniform> params: Params;
+struct Params { opacity: f32, _pad0: f32, _pad1: f32, _pad2: f32 };
 struct Output { @builtin(position) position: vec4<f32> };
 @vertex fn vs(@builtin(vertex_index) id: u32) -> Output {
  var p=array<vec2<f32>,3>(vec2(-1.,-1.),vec2(3.,-1.),vec2(-1.,3.));
  var o: Output; o.position=vec4(p[id],0.,1.); return o;
 }
+fn to_linear(c: f32) -> f32 {
+ return select(pow((c + 0.055) / 1.055, 2.4), c / 12.92, c <= 0.04045);
+}
 @fragment fn fs(in: Output)->@location(0) vec4<f32> {
- return textureLoad(picture,vec2<i32>(in.position.xy),0);
+ let texel=textureLoad(picture,vec2<i32>(in.position.xy),0);
+ let a=texel.a;
+ if (a <= 0.0) { return vec4<f32>(0.0); }
+ // Unpremultiply in sRGB (as the old CPU table did), linearise, re-premultiply.
+ let srgb=min(texel.rgb / a, vec3<f32>(1.0));
+ let lin=vec3<f32>(to_linear(srgb.r), to_linear(srgb.g), to_linear(srgb.b));
+ let ao=a * params.opacity;
+ return vec4<f32>(lin * ao, ao);
+}
+"#;
+/// Preview presentation: encode the linear working target to sRGB8 through
+/// the exact CPU transfer table (uploaded once as a 256x256 LUT indexed by
+/// f16 bit pattern; pack2x16float recovers the bits with the same
+/// round-to-nearest-even as the CPU half conversion). Bit-identical to the
+/// CPU LUT walk.
+const POST_SHADER: &str = r#"
+@group(0) @binding(0) var src: texture_2d<f32>;
+@group(0) @binding(1) var lut: texture_2d<u32>;
+struct Output { @builtin(position) position: vec4<f32> };
+@vertex fn vs(@builtin(vertex_index) id: u32) -> Output {
+ var p=array<vec2<f32>,3>(vec2(-1.,-1.),vec2(3.,-1.),vec2(-1.,3.));
+ var o: Output; o.position=vec4(p[id],0.,1.); return o;
+}
+fn encode(v: f32) -> f32 {
+ let bits = pack2x16float(vec2<f32>(v, 0.0)) & 0xffffu;
+ return f32(textureLoad(lut, vec2<u32>(bits & 255u, bits >> 8u), 0).x >> 8u) / 255.0;
+}
+@fragment fn fs(in: Output)->@location(0) vec4<f32> {
+ let px=textureLoad(src,vec2<i32>(in.position.xy),0);
+ return vec4<f32>(encode(px.r), encode(px.g), encode(px.b), 1.0);
 }
 "#;
 fn v(n: &Value, key: &str, default: f32) -> f32 {
@@ -79,6 +113,93 @@ fn rgba_to_pixmap(image: image::RgbaImage) -> Result<Pixmap> {
     }
     Ok(src)
 }
+/// A short constant-frame-rate clip, fully decoded at first use so every
+/// presentation timestamp is an index lookup instead of an ffmpeg spawn.
+/// Selection matches `-ss` accurate-seek semantics: the first frame covering
+/// the timestamp, verified pixel-identical on the conformance clip.
+struct Clip {
+    fps: f64,
+    frames: Vec<Arc<Pixmap>>,
+}
+/// (width, height, fps, frame count) for clips worth pre-decoding: short,
+/// constant-frame-rate and small enough to hold in RAM. Anything else bails
+/// and the caller keeps per-timestamp seeks.
+fn ffprobe_clip(source: &Path) -> Result<(u32, u32, f64, usize)> {
+    let out = std::process::Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height,avg_frame_rate,r_frame_rate,duration,nb_frames",
+            "-of",
+            "default=noprint_wrappers=1",
+        ])
+        .arg(source)
+        .output()?;
+    if !out.status.success() {
+        bail!("ffprobe failed for {}", source.display());
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let get = |key: &str| -> Result<&str> {
+        text.lines()
+            .find_map(|l| l.strip_prefix(&format!("{key}=")))
+            .context(format!("ffprobe has no {key}"))
+    };
+    let frac = |s: &str| -> Result<f64> {
+        if let Some((a, b)) = s.split_once('/') {
+            let (a, b): (f64, f64) = (a.parse()?, b.parse()?);
+            if b == 0. {
+                bail!("Bad frame rate {s}");
+            }
+            Ok(a / b)
+        } else {
+            Ok(s.parse()?)
+        }
+    };
+    let (w, h): (u32, u32) = (get("width")?.parse()?, get("height")?.parse()?);
+    let (avg, r) = (frac(get("avg_frame_rate")?)?, frac(get("r_frame_rate")?)?);
+    let (dur, n): (f64, usize) = (get("duration")?.parse()?, get("nb_frames")?.parse()?);
+    if !(w > 0 && h > 0) || !avg.is_finite() || avg <= 0. || !dur.is_finite() || dur <= 0. {
+        bail!("Unusable clip metadata");
+    }
+    if (r - avg).abs() > 1e-6
+        || dur > 10.
+        || (n as f64 - dur * avg).abs() > 2f64.max(0.02 * dur * avg)
+    {
+        bail!("Clip is long or variable-frame-rate; seeking per timestamp");
+    }
+    if (w as u64) * (h as u64) * (n as u64) > 32_000_000 {
+        bail!("Clip too large to pre-decode");
+    }
+    Ok((w, h, avg, n))
+}
+fn load_clip(source: &Path) -> Result<Clip> {
+    let (w, h, fps, n) = ffprobe_clip(source)?;
+    let out = std::process::Command::new("ffmpeg")
+        .args(["-v", "error", "-i"])
+        .arg(source)
+        .args(["-f", "rawvideo", "-pix_fmt", "rgba", "-"])
+        .output()?;
+    if !out.status.success() {
+        bail!("Clip decode failed for {}", source.display());
+    }
+    let frame = (w as usize) * (h as usize) * 4;
+    if out.stdout.len() != frame * n {
+        bail!("Clip decode produced an unexpected frame count");
+    }
+    let mut frames = Vec::with_capacity(n);
+    for bytes in out.stdout.chunks_exact(frame) {
+        let image =
+            image::RgbaImage::from_raw(w, h, bytes.to_vec()).context("clip frame")?;
+        frames.push(Arc::new(rgba_to_pixmap(image)?));
+    }
+    if frames.is_empty() {
+        bail!("Clip has no frames");
+    }
+    Ok(Clip { fps, frames })
+}
 /// Opt-in per-stage timing (set LUCENT_PROFILE=1); totals print to stderr after every frame.
 #[derive(Default)]
 struct Profile {
@@ -111,8 +232,6 @@ impl Profile {
     }
 }
 const SYNC_EVERY: u32 = 32;
-/// 1.0 as little-endian f16.
-const ONE_F16: [u8; 2] = [0x00, 0x3c];
 /// Pixel region (left, top, right, bottom), right/bottom exclusive.
 type Region = (u32, u32, u32, u32);
 /// Conservative pixel region covering `bounds` (already in target space), padded for
@@ -153,15 +272,21 @@ struct Gpu {
     device: wgpu::Device,
     queue: wgpu::Queue,
     pipeline: wgpu::RenderPipeline,
+    /// Texture-only layout for film-shader effects.
     layout: wgpu::BindGroupLayout,
+    /// Upload texture plus per-leaf opacity for the composite blit.
+    blit_layout: wgpu::BindGroupLayout,
+    opacity: wgpu::Buffer,
+    /// Preview presentation pipeline (f16 working target to sRGB8).
+    post_pipeline: wgpu::RenderPipeline,
+    post_layout: wgpu::BindGroupLayout,
+    /// sRGB transfer table as 256x256 R16Uint, indexed by f16 bit pattern.
+    lut_tex: wgpu::Texture,
+    /// Reused sRGB8 preview target.
+    preview_tex: Option<(u32, u32, wgpu::Texture)>,
     info: Value,
     /// Reused upload texture and bind group; leaves only write their own region.
     source: Option<(u32, u32, wgpu::Texture, wgpu::BindGroup)>,
-    lut: Vec<f32>,
-    /// `lut` as little-endian f16 bytes, for opaque pixels at full opacity.
-    lut16: Vec<[u8; 2]>,
-    /// linear(c / 255 / a) for every premultiplied (c, a) pair, indexed a * 256 + c.
-    unpremultiplied: Vec<f32>,
     staging: Vec<u8>,
     gpu_wait: Duration,
     pending: u32,
@@ -209,9 +334,43 @@ impl Gpu {
                 label: None,
                 source: wgpu::ShaderSource::Wgsl(SHADER.into()),
             });
+            let blit_layout =
+                device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: None,
+                    entries: &[
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 0,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Texture {
+                                sample_type: wgpu::TextureSampleType::Float {
+                                    filterable: false,
+                                },
+                                view_dimension: wgpu::TextureViewDimension::D2,
+                                multisampled: false,
+                            },
+                            count: None,
+                        },
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 1,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Uniform,
+                                has_dynamic_offset: false,
+                                min_binding_size: None,
+                            },
+                            count: None,
+                        },
+                    ],
+                });
+            let opacity = device.create_buffer(&wgpu::BufferDescriptor {
+                label: None,
+                size: 16,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
             let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: None,
-                bind_group_layouts: &[&layout],
+                bind_group_layouts: &[&blit_layout],
                 push_constant_ranges: &[],
             });
             let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -239,6 +398,99 @@ impl Gpu {
                 multiview: None,
                 cache: None,
             });
+            let post_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: None,
+                source: wgpu::ShaderSource::Wgsl(POST_SHADER.into()),
+            });
+            let post_layout =
+                device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: None,
+                    entries: &[
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 0,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Texture {
+                                sample_type: wgpu::TextureSampleType::Float {
+                                    filterable: false,
+                                },
+                                view_dimension: wgpu::TextureViewDimension::D2,
+                                multisampled: false,
+                            },
+                            count: None,
+                        },
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 1,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Texture {
+                                sample_type: wgpu::TextureSampleType::Uint,
+                                view_dimension: wgpu::TextureViewDimension::D2,
+                                multisampled: false,
+                            },
+                            count: None,
+                        },
+                    ],
+                });
+            let post_pipeline_layout =
+                device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: None,
+                    bind_group_layouts: &[&post_layout],
+                    push_constant_ranges: &[],
+                });
+            let post_pipeline =
+                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: None,
+                    layout: Some(&post_pipeline_layout),
+                    vertex: wgpu::VertexState {
+                        module: &post_shader,
+                        entry_point: "vs",
+                        compilation_options: Default::default(),
+                        buffers: &[],
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &post_shader,
+                        entry_point: "fs",
+                        compilation_options: Default::default(),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format: wgpu::TextureFormat::Rgba8Unorm,
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                    }),
+                    primitive: Default::default(),
+                    depth_stencil: None,
+                    multisample: Default::default(),
+                    multiview: None,
+                    cache: None,
+                });
+            let lut = srgb_lut();
+            let lut_tex = device.create_texture(&wgpu::TextureDescriptor {
+                label: None,
+                size: wgpu::Extent3d {
+                    width: 256,
+                    height: 256,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::R16Uint,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            queue.write_texture(
+                lut_tex.as_image_copy(),
+                bytemuck::cast_slice(&lut),
+                wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(512),
+                    rows_per_image: Some(256),
+                },
+                wgpu::Extent3d {
+                    width: 256,
+                    height: 256,
+                    depth_or_array_layers: 1,
+                },
+            );
             let hardware = !matches!(adapter_info.device_type, wgpu::DeviceType::Cpu);
             let info = json!({"available":true,"apiVersion":"0.1.0","features":["groups","transforms","clipping","paths","text","images","cameras","transitions","video","shader-wgsl","supersampling","motion-blur","svg"],"adapter":adapter_info.name,"driver":adapter_info.driver_info,"hardware":hardware,"maxDimensions":limits.max_texture_dimension_2d,"textureFormats":["rgba16float"],"workingBitDepth":16,"rasterization":"Rust tiny-skia/Cosmic Text; linear-light wgpu composition"});
             Ok(Self {
@@ -246,29 +498,28 @@ impl Gpu {
                 queue,
                 pipeline,
                 layout,
+                blit_layout,
+                opacity,
+                post_pipeline,
+                post_layout,
+                lut_tex,
+                preview_tex: None,
                 info,
                 source: None,
-                lut: (0..256).map(|i| linear(i as f32 / 255.)).collect(),
-                lut16: (0..256)
-                    .map(|i| f16::from_f32(linear(i as f32 / 255.)).to_le_bytes())
-                    .collect(),
-                unpremultiplied: (0..65536u32)
-                    .map(|i| {
-                        let (a, c) = ((i >> 8) as f32 / 255., (i & 255) as f32);
-                        if a == 0. {
-                            0.
-                        } else {
-                            linear((c / 255. / a).min(1.))
-                        }
-                    })
-                    .collect(),
                 staging: Vec::new(),
                 gpu_wait: Duration::ZERO,
                 pending: 0,
             })
         })
     }
-    fn texture(&self, width: u32, height: u32, usage: wgpu::TextureUsages) -> wgpu::Texture {
+    fn texture(
+        &self,
+        width: u32,
+        height: u32,
+        usage: wgpu::TextureUsages,
+        format: wgpu::TextureFormat,
+        views: &[wgpu::TextureFormat],
+    ) -> wgpu::Texture {
         self.device.create_texture(&wgpu::TextureDescriptor {
             label: None,
             size: wgpu::Extent3d {
@@ -279,12 +530,13 @@ impl Gpu {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba16Float,
+            format,
             usage,
-            view_formats: &[],
+            view_formats: views,
         })
     }
-    /// Blend `pixels` (premultiplied RGBA8, sRGB) onto `target` in linear light.
+    /// Upload `pixels` (premultiplied RGBA8, sRGB) for `region`; the blit
+    /// shader linearises and applies the leaf opacity on the GPU.
     /// `region` bounds every non-transparent pixel; nothing outside it is read.
     fn composite(
         &mut self,
@@ -301,51 +553,51 @@ impl Gpu {
         let rw = right - left;
         let rh = bottom - top;
         self.staging.clear();
-        self.staging.reserve((rw * rh * 8) as usize);
+        self.staging.reserve((rw * rh * 4) as usize);
         for y in top..bottom {
             let row = ((y * width + left) * 4) as usize;
-            for px in data[row..row + (rw * 4) as usize].chunks_exact(4) {
-                if px[3] == 255 && opacity == 1. {
-                    // Opaque at full opacity: the f16 of each channel is a table lookup.
-                    for &c in &px[..3] {
-                        self.staging.extend_from_slice(&self.lut16[c as usize]);
-                    }
-                    self.staging.extend_from_slice(&ONE_F16);
-                    continue;
-                }
-                let a = px[3] as f32 / 255.;
-                if a == 0. {
-                    self.staging.extend_from_slice(&[0; 8]);
-                    continue;
-                }
-                for &c in &px[..3] {
-                    let value = if a == 1. {
-                        self.lut[c as usize]
-                    } else {
-                        self.unpremultiplied[(px[3] as usize) << 8 | c as usize]
-                    };
-                    self.staging
-                        .extend_from_slice(&f16::from_f32(value * a * opacity).to_le_bytes());
-                }
-                self.staging
-                    .extend_from_slice(&f16::from_f32(a * opacity).to_le_bytes());
-            }
+            self.staging
+                .extend_from_slice(&data[row..row + (rw * 4) as usize]);
         }
+        self.blit(target, (width, height), region, opacity)
+    }
+    /// Upload staging and draw the fullscreen blit for `region`.
+    fn blit(
+        &mut self,
+        target: &wgpu::Texture,
+        (width, height): (u32, u32),
+        region: Region,
+        opacity: f32,
+    ) -> Result<()> {
+        let (left, top, right, bottom) = region;
+        let rw = right - left;
+        let rh = bottom - top;
+        let mut op = [0u8; 16];
+        op[..4].copy_from_slice(&opacity.to_le_bytes());
+        self.queue.write_buffer(&self.opacity, 0, &op);
         let (w, h) = (width, height);
         if !matches!(&self.source, Some((sw, sh, ..)) if *sw == w && *sh == h) {
             let texture = self.texture(
                 w,
                 h,
                 wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                wgpu::TextureFormat::Rgba8Unorm,
+                &[],
             );
             let view = texture.create_view(&Default::default());
             let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: None,
-                layout: &self.layout,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&view),
-                }],
+                layout: &self.blit_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: self.opacity.as_entire_binding(),
+                    },
+                ],
             });
             self.source = Some((w, h, texture, bind));
         }
@@ -364,7 +616,7 @@ impl Gpu {
             &self.staging,
             wgpu::ImageDataLayout {
                 offset: 0,
-                bytes_per_row: Some(rw * 8),
+                bytes_per_row: Some(rw * 4),
                 rows_per_image: Some(rh),
             },
             wgpu::Extent3d {
@@ -459,6 +711,8 @@ impl Gpu {
             size.width,
             size.height,
             wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+            wgpu::TextureFormat::Rgba16Float,
+            &[],
         );
         let mut commands = self.device.create_command_encoder(&Default::default());
         commands.copy_texture_to_texture(target.as_image_copy(), source.as_image_copy(), size);
@@ -495,9 +749,9 @@ impl Gpu {
         self.device.poll(wgpu::Maintain::Wait);
         Ok(())
     }
-    fn read(&self, target: &wgpu::Texture) -> Result<Vec<u8>> {
+    fn read(&self, target: &wgpu::Texture, bpp: u32) -> Result<Vec<u8>> {
         let size = target.size();
-        let row = (size.width * 8 + 255) & !255;
+        let row = (size.width * bpp + 255) & !255;
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
             size: (row * size.height) as u64,
@@ -525,13 +779,71 @@ impl Gpu {
         self.device.poll(wgpu::Maintain::Wait);
         rx.recv()??;
         let bytes = buffer.slice(..).get_mapped_range();
-        let mut out = Vec::with_capacity((size.width * size.height * 8) as usize);
+        let mut out = Vec::with_capacity((size.width * size.height * bpp) as usize);
         for line in bytes.chunks_exact(row as usize) {
-            out.extend_from_slice(&line[..(size.width * 8) as usize]);
+            out.extend_from_slice(&line[..(size.width * bpp) as usize]);
         }
         drop(bytes);
         buffer.unmap();
         Ok(out)
+    }
+    /// Present the linear f16 `target` as sRGB8 through the exact transfer
+    /// table, returning display bytes with no CPU conversion.
+    fn present(&mut self, target: &wgpu::Texture, width: u32, height: u32) -> Result<Vec<u8>> {
+        if !matches!(&self.preview_tex, Some((w, h, _)) if *w == width && *h == height) {
+            self.preview_tex = Some((
+                width,
+                height,
+                self.texture(
+                    width,
+                    height,
+                    wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                    wgpu::TextureFormat::Rgba8Unorm,
+                    &[],
+                ),
+            ));
+        }
+        let (_, _, shown) = self.preview_tex.as_ref().unwrap();
+        // Plain float view; pack2x16float recovers exact f16 bit patterns.
+        let src_view = target.create_view(&Default::default());
+        let lut_view = self.lut_tex.create_view(&Default::default());
+        let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &self.post_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&src_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&lut_view),
+                },
+            ],
+        });
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        {
+            let shown_view = shown.create_view(&Default::default());
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: None,
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &shown_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.post_pipeline);
+            pass.set_bind_group(0, &bind, &[]);
+            pass.draw(0..3, 0..1);
+        }
+        self.queue.submit(Some(encoder.finish()));
+        self.read(shown, 4)
     }
 }
 pub(crate) struct Renderer {
@@ -549,6 +861,12 @@ pub(crate) struct Renderer {
     /// capped at 64 entries; a looped clip would otherwise respawn ffmpeg
     /// for the same timestamps on every pass.
     video: HashMap<(PathBuf, i32), Arc<Pixmap>>,
+    /// Pre-decoded short CFR clips by canonical path; None marks clips that
+    /// failed the pre-decode criteria and keep per-timestamp seeks.
+    clips: HashMap<PathBuf, Option<Arc<Clip>>>,
+    /// Finished text-leaf rasters by rendering-state hash, captured before
+    /// leaf opacity; static text then skips shaping replay and raster fills.
+    text_cache: HashMap<u64, (Region, Vec<u8>)>,
     svg: Svg,
     svg_fonts: FontDb,
     encode_lut: Vec<u16>,
@@ -562,6 +880,34 @@ impl Renderer {
     /// Fonts shared with scripts (`__measure_text`) so layout and drawing agree.
     pub(crate) fn font_db(&self) -> FontDb {
         self.svg_fonts.clone()
+    }
+    /// Pre-decoded clip for `source`, or None when the clip is long, VFR or
+    /// otherwise unsuitable. Load failures also yield None so rendering falls
+    /// back to per-timestamp seeks instead of failing.
+    fn clip(&mut self, source: &PathBuf) -> Option<Arc<Clip>> {
+        if let Some(hit) = self.clips.get(source) {
+            return hit.clone();
+        }
+        let predecoded = load_clip(source).ok().map(Arc::new);
+        self.clips.insert(source.clone(), predecoded.clone());
+        predecoded
+    }
+    /// Rendering-state hash for a text leaf: node content plus the effective
+    /// transform and output size. Opacity is applied later on the GPU, and
+    /// masked text is never cached, so equal keys rasterise identically.
+    fn text_key(n: &Value, transform: &Transform, width: u32, height: u32) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        serde_json::to_vec(n).unwrap_or_default().hash(&mut h);
+        transform.sx.to_bits().hash(&mut h);
+        transform.kx.to_bits().hash(&mut h);
+        transform.ky.to_bits().hash(&mut h);
+        transform.sy.to_bits().hash(&mut h);
+        transform.tx.to_bits().hash(&mut h);
+        transform.ty.to_bits().hash(&mut h);
+        width.hash(&mut h);
+        height.hash(&mut h);
+        h.finish()
     }
 
     pub(crate) fn new(root: &Path, manifest: &Value) -> Result<Self> {
@@ -592,6 +938,8 @@ impl Renderer {
             scratch: None,
             images: HashMap::new(),
             video: HashMap::new(),
+            clips: HashMap::new(),
+            text_cache: HashMap::new(),
             encode_lut: srgb_lut(),
             verify_bbox: env::var_os("LUCENT_VERIFY_BBOX").is_some(),
         })
@@ -821,41 +1169,115 @@ impl Renderer {
                         } else {
                             0.
                         };
-                        buffer.draw(
-                            &mut self.fonts,
-                            &mut self.swash,
-                            Color::rgba(rgba[0], rgba[1], rgba[2], rgba[3]),
-                            |px, py, w, h, c| {
-                                let mut p = Paint::default();
-                                p.set_color_rgba8(c.r(), c.g(), c.b(), c.a());
-                                if let Some(r) = Rect::from_xywh(
-                                    x + anchor + px as f32,
-                                    y - first_baseline + py as f32,
-                                    w as f32,
-                                    h as f32,
-                                ) {
-                                    pix.fill_rect(r, &p, transform, mask.as_deref());
-                                    region = union(
-                                        region,
-                                        r.transform(transform)
-                                            .and_then(|b| region_of(b, 2., width, height)),
+                        // Static text with no clip mask reuses its finished
+                        // raster; the key covers content, transform and
+                        // size, and opacity applies later on the GPU.
+                        let cache_key = mask
+                            .is_none()
+                            .then(|| Self::text_key(n, &transform, width, height));
+                        if let Some((hit_region, hit_bytes)) = cache_key
+                            .and_then(|k| self.text_cache.get(&k).cloned())
+                        {
+                            // Repopulate the scratch region; the shared
+                            // tail composites and clears as usual.
+                            let (l, t, r, b) = hit_region;
+                            let stride = width as usize * 4;
+                            let row_bytes = (r - l) as usize * 4;
+                            let data = pix.data_mut();
+                            for (row, y) in (t as usize..b as usize).enumerate() {
+                                data[y * stride + l as usize * 4
+                                    ..y * stride + r as usize * 4]
+                                    .copy_from_slice(
+                                        &hit_bytes[row * row_bytes..(row + 1) * row_bytes],
+                                    );
+                            }
+                            region = union(region, Some(hit_region));
+                        } else {
+                            // cosmic-text emits one callback per pixel; batch
+                            // consecutive same-colour pixels of a row into a
+                            // single fill. Pixels are bit-identical to one
+                            // fill per pixel, with far fewer raster calls.
+                            let mut pending: Option<(i32, i32, i32, [u8; 4])> = None;
+                            let mut flush = |pending: &mut Option<(i32, i32, i32, [u8; 4])>| {
+                                if let Some((py, x0, x1, c)) = pending.take() {
+                                    let mut p = Paint::default();
+                                    p.set_color_rgba8(c[0], c[1], c[2], c[3]);
+                                    if let Some(r) = Rect::from_xywh(
+                                        x + anchor + x0 as f32,
+                                        y - first_baseline + py as f32,
+                                        (x1 - x0) as f32,
+                                        1.,
+                                    ) {
+                                        pix.fill_rect(r, &p, transform, mask.as_deref());
+                                        region = union(
+                                            region,
+                                            r.transform(transform).and_then(|b| {
+                                                region_of(b, 2., width, height)
+                                            }),
+                                        );
+                                    }
+                                }
+                            };
+                            buffer.draw(
+                                &mut self.fonts,
+                                &mut self.swash,
+                                Color::rgba(rgba[0], rgba[1], rgba[2], rgba[3]),
+                                |px, py, _w, _h, c| {
+                                    let c = [c.r(), c.g(), c.b(), c.a()];
+                                    match &mut pending {
+                                        Some((ry, _, x1, rc))
+                                            if *ry == py && *x1 == px && *rc == c =>
+                                        {
+                                            *x1 = px + 1
+                                        }
+                                        _ => {
+                                            flush(&mut pending);
+                                            pending = Some((py, px, px + 1, c));
+                                        }
+                                    }
+                                },
+                            );
+                            flush(&mut pending);
+                            // Store the finished region for identical frames.
+                            if let (Some(k), Some(reg)) = (cache_key, region) {
+                                let (l, t, r, b) = reg;
+                                let stride = width as usize * 4;
+                                let data = pix.data();
+                                let mut bytes = Vec::with_capacity(
+                                    ((r - l) * (b - t) * 4) as usize,
+                                );
+                                for y in t as usize..b as usize {
+                                    bytes.extend_from_slice(
+                                        &data[y * stride + l as usize * 4
+                                            ..y * stride + r as usize * 4],
                                     );
                                 }
-                            },
-                        );
+                                if self.text_cache.len() >= 64 {
+                                    self.text_cache.clear();
+                                }
+                                self.text_cache.insert(k, (reg, bytes));
+                            }
+                        }
                     }
                     "image" | "video" => {
                         let file = n["src"].as_str().context("image/video src")?;
                         let source = safe_asset(&self.root, file)?;
                         let src: Arc<Pixmap> = if kind == "video" {
                             let time = v(n, "sourceTime", 0.);
-                            // Identical presentation times reuse one decoded frame.
-                            let ms = (time * 1000.).round() as i32;
-                            if let Some(hit) =
-                                self.video.get(&(source.clone(), ms))
-                            {
-                                hit.clone()
+                            // Short CFR clips are fully decoded once; the index
+                            // is the first frame covering the timestamp.
+                            if let Some(clip) = self.clip(&source) {
+                                let len = clip.frames.len() as i64;
+                                let idx = ((time as f64 * clip.fps).floor() as i64)
+                                    .clamp(0, len - 1)
+                                    as usize;
+                                clip.frames[idx].clone()
                             } else {
+                                // Identical presentation times reuse one decoded frame.
+                                let ms = (time * 1000.).round() as i32;
+                                if let Some(hit) = self.video.get(&(source.clone(), ms)) {
+                                    hit.clone()
+                                } else {
                                 let mut decoded = None;
                                 // A requested timestamp can fall just after a VFR clip's last
                                 // presentation timestamp. Walk back by less than a frame on
@@ -898,6 +1320,7 @@ impl Renderer {
                                 }
                                 self.video.insert((source, ms), pixmap.clone());
                                 pixmap
+                            }
                             }
                         } else if let Some(hit) = self.images.get(&source) {
                             hit.clone()
@@ -962,14 +1385,14 @@ impl Renderer {
         }
         Ok(())
     }
-    fn render_linear(
+    fn render_target(
         &mut self,
         graph: &Value,
         width: u32,
         height: u32,
         design: &Value,
         fit: &str,
-    ) -> Result<Vec<u8>> {
+    ) -> Result<wgpu::Texture> {
         if width == 0
             || height == 0
             || width > self.gpu.info["maxDimensions"].as_u64().unwrap_or(0) as u32
@@ -980,7 +1403,11 @@ impl Renderer {
         let target = self.gpu.texture(
             width,
             height,
-            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::COPY_SRC
+                | wgpu::TextureUsages::TEXTURE_BINDING,
+            wgpu::TextureFormat::Rgba16Float,
+            &[],
         );
         let view = target.create_view(&Default::default());
         let bg = color(graph["background"].as_str().unwrap_or("#000000"))?;
@@ -1024,7 +1451,21 @@ impl Renderer {
             .pre_scale(scale, scale)
         };
         self.node(graph, &target, transform, 1., None)?;
-        self.gpu.read(&target)
+        Ok(target)
+    }
+    fn render_linear(
+        &mut self,
+        graph: &Value,
+        width: u32,
+        height: u32,
+        design: &Value,
+        fit: &str,
+    ) -> Result<Vec<u8>> {
+        let target = self.render_target(graph, width, height, design, fit)?;
+        let t_read = Instant::now();
+        let bytes = self.gpu.read(&target, 8)?;
+        self.prof.add("readback", t_read);
+        Ok(bytes)
     }
     pub(crate) fn render(
         &mut self,
@@ -1043,10 +1484,9 @@ impl Renderer {
         }
         encode_frame(&values, width, height)
     }
-    /// Preview-only fast path: the same linear working pixels as `render`,
-    /// mapped through the same sRGB transfer to 8-bit for direct display.
-    /// Skips the 16-bit PNG encode (and the caller's PNG decode); export
-    /// pixels are untouched.
+    /// Preview-only fast path: the linear working target is encoded to
+    /// sRGB8 by a GPU presentation pass through the exact transfer table.
+    /// No CPU conversion and no 16-bit readback; export pixels are untouched.
     pub(crate) fn preview(
         &mut self,
         graph: &Value,
@@ -1055,18 +1495,13 @@ impl Renderer {
         design: &Value,
         fit: &str,
     ) -> Result<Vec<u8>> {
-        let bytes = self.render_linear(graph, width, height, design, fit)?;
-        let mut out = Vec::with_capacity((width as usize) * (height as usize) * 4);
-        for px in bytes.chunks_exact(8) {
-            for c in 0..3 {
-                let bits = u16::from_le_bytes([px[c * 2], px[c * 2 + 1]]);
-                out.push((self.encode_lut[bits as usize] >> 8) as u8);
-            }
-            out.push(255);
-        }
+        let target = self.render_target(graph, width, height, design, fit)?;
+        let t_post = Instant::now();
+        let out = self.gpu.present(&target, width, height)?;
+        self.prof.add("preview-post", t_post);
         Ok(out)
     }
-    fn sampled(
+    pub(crate) fn sampled(
         &mut self,
         graphs: &[Value],
         width: u32,
@@ -1089,7 +1524,6 @@ impl Renderer {
             let t_encode = Instant::now();
             let png = encode_frame_f16(&bytes, &self.encode_lut, width, height);
             self.prof.add("png-encode", t_encode);
-            self.flush_profile();
             return png;
         }
         let mut sum = vec![0f32; (width * height * 3) as usize];
@@ -1117,10 +1551,9 @@ impl Renderer {
         let t_encode = Instant::now();
         let png = encode_frame(&sum, width, height);
         self.prof.add("png-encode", t_encode);
-        self.flush_profile();
         png
     }
-    fn flush_profile(&mut self) {
+    pub(crate) fn flush_profile(&mut self) {
         if self.prof.enabled {
             eprintln!("gpu-wait={:.1}ms", self.gpu.gpu_wait.as_secs_f64() * 1e3);
         }
@@ -1260,6 +1693,7 @@ pub fn server(bundle: &str, manifest: &str) -> Result<()> {
             request["fit"].as_str().unwrap_or("fit"),
             ss,
         )?;
+        renderer.flush_profile();
         stdout.write_all(&(png.len() as u32).to_le_bytes())?;
         stdout.write_all(&png)?;
         stdout.flush()?;

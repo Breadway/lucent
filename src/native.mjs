@@ -16,10 +16,14 @@ export async function openNative(p, settings = {}) {
     ["native-server", bundled, p.manifestFile],
     { stdio: ["pipe", "pipe", "pipe"] },
   );
-  let buffer = Buffer.alloc(0),
-    error,
+  let error,
     waiter,
     stderr = "";
+  // Chunk queue: concatenating on every stdout event recopies the whole
+  // pending packet each time, so consume from the queue instead.
+  let chunks = [],
+    buffered = 0,
+    headOff = 0;
   const onAbort = () => child.kill("SIGTERM");
   aborter.signal.addEventListener("abort", onAbort, { once: true });
   child.stderr.on(
@@ -39,19 +43,49 @@ export async function openNative(p, settings = {}) {
     waiter?.();
   });
   child.stdout.on("data", (b) => {
-    buffer = Buffer.concat([buffer, b]);
+    chunks.push(b);
+    buffered += b.length;
     waiter?.();
   });
+  function take(n) {
+    const out = Buffer.allocUnsafe(n);
+    let off = 0;
+    while (off < n) {
+      const head = chunks[0],
+        avail = head.length - headOff,
+        count = Math.min(n - off, avail);
+      head.copy(out, off, headOff, headOff + count);
+      off += count;
+      buffered -= count;
+      if (count === avail) {
+        chunks.shift();
+        headOff = 0;
+      } else {
+        headOff += count;
+      }
+    }
+    return out;
+  }
+  function peekU32() {
+    const out = Buffer.allocUnsafe(4);
+    let off = 0;
+    for (let i = 0; i < chunks.length && off < 4; i++) {
+      const start = i === 0 ? headOff : 0,
+        count = Math.min(4 - off, chunks[i].length - start);
+      chunks[i].copy(out, off, start, start + count);
+      off += count;
+    }
+    return out.readUInt32LE(0);
+  }
   async function packet() {
     const deadline = Date.now() + 120000;
     while (true) {
-      if (buffer.length >= 4) {
-        const len = buffer.readUInt32LE(0);
+      if (buffered >= 4) {
+        const len = peekU32();
         if (len > 256 * 1024 * 1024) throw Error("Invalid native frame length");
-        if (buffer.length >= len + 4) {
-          const data = buffer.subarray(4, len + 4);
-          buffer = buffer.subarray(len + 4);
-          return data;
+        if (buffered >= len + 4) {
+          take(4);
+          return take(len);
         }
       }
       if (error) throw error;
