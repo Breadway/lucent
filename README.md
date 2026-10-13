@@ -50,6 +50,5 @@ top-level `../astra-films`, `../breadway-film-projects` and
 - `lucent-films/astra-films` contains Astra and education scenes, assets, fonts and available narration/audio.
 - `lucent-films/breadway-film-projects` contains Breadway films, assets, fonts, data and player resources.
 - `lucent-films/omnia-nano-explainer` contains the OmniAstra nano explainer (word-anchored scenes, TTS narration).
-- `lucent-films/bos-trailer` contains the BOS trailer rewritten as a portable native Lucent film.
 
 Original source repositories remain intact. The migrated film folders hold their own manifests and use Lucent compatibility code from outside the film projects.
