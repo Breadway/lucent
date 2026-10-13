@@ -65,6 +65,25 @@ fn main() -> Result<()> {
         Some("frame-stream") => {
             let mut stdin = io::BufReader::new(io::stdin().lock());
             let mut stdout = io::BufWriter::new(io::stdout().lock());
+            // The transfer table is process-constant; rebuilding it per
+            // frame repeats 131k powf evaluations for identical bytes.
+            let mut lut = vec![0u16; 65536];
+            for (i, v) in lut.iter_mut().enumerate() {
+                let s = i as f32 / 65535.;
+                let l = if s <= 0.04045 {
+                    s / 12.92
+                } else {
+                    ((s + 0.055) / 1.055).powf(2.4)
+                };
+                let l = f16::from_f32(l).to_f32();
+                let s = if l <= 0.0031308 {
+                    12.92 * l
+                } else {
+                    1.055 * l.powf(1. / 2.4) - 0.055
+                };
+                *v = (s * 65535.).round() as u16;
+            }
+            let mut row: Vec<u8> = Vec::new();
             loop {
                 let mut size = [0; 4];
                 match stdin.read_exact(&mut size) {
@@ -80,29 +99,23 @@ fn main() -> Result<()> {
                 stdin.read_exact(&mut bytes)?;
                 let rgba = image::load_from_memory(&bytes)?.into_rgba16();
                 write!(stdout, "P6\n{} {}\n65535\n", rgba.width(), rgba.height())?;
-                let mut lut = vec![0u16; 65536];
-                for (i, v) in lut.iter_mut().enumerate() {
-                    let s = i as f32 / 65535.;
-                    let l = if s <= 0.04045 {
-                        s / 12.92
-                    } else {
-                        ((s + 0.055) / 1.055).powf(2.4)
-                    };
-                    let l = f16::from_f32(l).to_f32();
-                    let s = if l <= 0.0031308 {
-                        12.92 * l
-                    } else {
-                        1.055 * l.powf(1. / 2.4) - 0.055
-                    };
-                    *v = (s * 65535.).round() as u16;
+                let w = rgba.width() as usize;
+                let samples = rgba.into_raw();
+                if row.len() != w * 6 {
+                    row.resize(w * 6, 0);
                 }
-                for pixel in rgba.pixels() {
-                    if pixel[3] != 65535 {
-                        bail!("encoding frame must already be flattened");
+                for stripe in samples.chunks_exact(w * 4) {
+                    for (dst, px) in row.chunks_exact_mut(6).zip(stripe.chunks_exact(4)) {
+                        if px[3] != 65535 {
+                            bail!("encoding frame must already be flattened");
+                        }
+                        for c in 0..3 {
+                            let be = lut[px[c] as usize].to_be_bytes();
+                            dst[c * 2] = be[0];
+                            dst[c * 2 + 1] = be[1];
+                        }
                     }
-                    for c in &pixel.0[..3] {
-                        stdout.write_all(&lut[*c as usize].to_be_bytes())?;
-                    }
+                    stdout.write_all(&row)?;
                 }
                 stdout.flush()?;
             }
