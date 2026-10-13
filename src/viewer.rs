@@ -80,14 +80,13 @@ impl Viewer {
         if size.width == 0 || size.height == 0 {
             return Ok(());
         }
-        let png = self.renderer.render(
+        let rgba8 = self.renderer.preview(
             &graph,
             size.width,
             size.height,
             &self.manifest["design"],
             "fit",
         )?;
-        let image = image::load_from_memory(&png)?.into_rgba8();
         let surface = self.surface.as_mut().context("surface")?;
         surface
             .resize(
@@ -96,7 +95,7 @@ impl Viewer {
             )
             .map_err(|e| anyhow::anyhow!("{e}"))?;
         let mut buffer = surface.buffer_mut().map_err(|e| anyhow::anyhow!("{e}"))?;
-        for (dst, p) in buffer.iter_mut().zip(image.pixels()) {
+        for (dst, p) in buffer.iter_mut().zip(rgba8.chunks_exact(4)) {
             *dst = ((p[0] as u32) << 16) | ((p[1] as u32) << 8) | p[2] as u32;
         }
         buffer.present().map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -285,5 +284,93 @@ pub fn play(bundle: &str, manifest_file: &str) -> Result<()> {
     if let Some(e) = app.error {
         anyhow::bail!(e);
     }
+    Ok(())
+}
+/// Headless preview benchmark: no window, no vsync. Runs `preview` (viewing)
+/// and `render` (export PNG) over the same timestamps so the fast path stays
+/// honest, then checks frame 0 agrees within 1 LSB per channel.
+pub fn preview_bench(
+    bundle: &str,
+    manifest_file: &str,
+    frames: usize,
+    width: u32,
+    height: u32,
+) -> Result<()> {
+    let manifest_path = Path::new(manifest_file).canonicalize()?;
+    let root = manifest_path.parent().context("root")?;
+    let manifest: Value = serde_json::from_slice(&fs::read(&manifest_path)?)?;
+    if manifest["renderer"] == "browser-only" {
+        anyhow::bail!("Browser-only film cannot use the native preview benchmark");
+    }
+    let mut renderer = Renderer::new(root, &manifest)?;
+    let (_runtime, context, deadline) = vm(bundle, Some(renderer.font_db()))?;
+    let scenes: Value = serde_json::from_str(&context.with(|ctx| {
+        ctx.eval::<String, _>(
+            "JSON.stringify(__film.scenes.map(s=>({id:s.id,renderer:s.renderer,requires:s.requires})))",
+        )
+    })?)?;
+    validate_native_scenes(&scenes, renderer.capabilities())?;
+    let total = context.with(|ctx| ctx.eval::<f64, _>("__film.duration"))?;
+    if !total.is_finite() || total <= 0. {
+        anyhow::bail!("Invalid film duration");
+    }
+    if frames == 0 || width == 0 || height == 0 {
+        anyhow::bail!("preview-bench needs frames, width and height");
+    }
+    let fps = 30.;
+    let timestamp = |i: usize| {
+        ((i as f64 / fps) % total.max(1e-3)).clamp(0., (total - 1e-6).max(0.))
+    };
+    let graph_at = |t: f64| -> Result<Value> {
+        *deadline.lock().unwrap() = Instant::now() + Duration::from_secs(5);
+        let json =
+            context.with(|ctx| ctx.eval::<String, _>(format!("JSON.stringify(__graph({t}))")))?;
+        let mut graph: Value = serde_json::from_str(&json)?;
+        prepare_clips(&mut graph, t as f32)?;
+        Ok(graph)
+    };
+    // Warmup: pipeline compile plus hot image/video caches.
+    for i in 0..3.min(frames) {
+        let graph = graph_at(timestamp(i))?;
+        let _ = renderer.preview(&graph, width, height, &manifest["design"], "fit")?;
+    }
+    let start = Instant::now();
+    for i in 0..frames {
+        let graph = graph_at(timestamp(i))?;
+        let _ = renderer.preview(&graph, width, height, &manifest["design"], "fit")?;
+    }
+    let preview_secs = start.elapsed().as_secs_f64();
+    let start = Instant::now();
+    for i in 0..frames {
+        let graph = graph_at(timestamp(i))?;
+        let _ = renderer.render(&graph, width, height, &manifest["design"], "fit")?;
+    }
+    let export_secs = start.elapsed().as_secs_f64();
+    // Frame 0 agreement: same transfer, 8-bit truncation, so at most 1 LSB.
+    let graph = graph_at(timestamp(0))?;
+    let shown = renderer.preview(&graph, width, height, &manifest["design"], "fit")?;
+    let png = renderer.render(&graph, width, height, &manifest["design"], "fit")?;
+    let exported = image::load_from_memory(&png)?.into_rgba16();
+    let mut max_diff: u8 = 0;
+    for (a, p) in exported.pixels().zip(shown.chunks_exact(4)) {
+        for c in 0..3 {
+            max_diff = max_diff.max(((a[c] >> 8) as u8).abs_diff(p[c]));
+        }
+    }
+    println!(
+        "{}",
+        serde_json::json!({
+            "schemaVersion": 1,
+            "film": manifest["id"],
+            "frames": frames,
+            "resolution": [width, height],
+            "cachesHot": true,
+            "previewSecs": preview_secs,
+            "previewFps": frames as f64 / preview_secs,
+            "exportSecs": export_secs,
+            "exportFps": frames as f64 / export_secs,
+            "frame0MaxLsbDiff": max_diff,
+        })
+    );
     Ok(())
 }

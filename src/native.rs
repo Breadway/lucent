@@ -7,6 +7,7 @@ use resvg::tiny_skia as sk;
 use rquickjs::{Context, Runtime};
 use serde_json::{json, Value};
 use std::{
+    collections::HashMap,
     env, fs,
     io::{self, BufRead, Write},
     path::{Path, PathBuf},
@@ -64,6 +65,19 @@ fn safe_asset(root: &Path, file: &str) -> Result<PathBuf> {
         bail!("Asset escapes project: {file}");
     }
     Ok(p)
+}
+/// Decode-once helper: premultiplied tiny-skia surface from an sRGB RGBA8 image.
+/// The source surface never depends on per-frame transforms, so still images
+/// are decoded and premultiplied once and reused for every frame.
+fn rgba_to_pixmap(image: image::RgbaImage) -> Result<Pixmap> {
+    let (w, h) = image.dimensions();
+    let mut src = Pixmap::new(w, h).context("image allocation")?;
+    for (dst, p) in src.pixels_mut().iter_mut().zip(image.pixels()) {
+        *dst = tiny_skia::Color::from_rgba8(p[0], p[1], p[2], p[3])
+            .premultiply()
+            .to_color_u8();
+    }
+    Ok(src)
 }
 /// Opt-in per-stage timing (set LUCENT_PROFILE=1); totals print to stderr after every frame.
 #[derive(Default)]
@@ -529,6 +543,12 @@ pub(crate) struct Renderer {
     prof: Profile,
     /// Frame-sized pixmap reused by every leaf; always fully transparent between leaves.
     scratch: Option<Pixmap>,
+    /// Decoded still-image surfaces by canonical path.
+    images: HashMap<PathBuf, Arc<Pixmap>>,
+    /// Decoded video frames by (canonical path, presentation millisecond),
+    /// capped at 64 entries; a looped clip would otherwise respawn ffmpeg
+    /// for the same timestamps on every pass.
+    video: HashMap<(PathBuf, i32), Arc<Pixmap>>,
     svg: Svg,
     svg_fonts: FontDb,
     encode_lut: Vec<u16>,
@@ -570,6 +590,8 @@ impl Renderer {
                 ..Default::default()
             },
             scratch: None,
+            images: HashMap::new(),
+            video: HashMap::new(),
             encode_lut: srgb_lut(),
             verify_bbox: env::var_os("LUCENT_VERIFY_BBOX").is_some(),
         })
@@ -824,53 +846,69 @@ impl Renderer {
                     }
                     "image" | "video" => {
                         let file = n["src"].as_str().context("image/video src")?;
-                        let image = if kind == "video" {
+                        let source = safe_asset(&self.root, file)?;
+                        let src: Arc<Pixmap> = if kind == "video" {
                             let time = v(n, "sourceTime", 0.);
-                            let source = safe_asset(&self.root, file)?;
-                            let mut decoded = None;
-                            // A requested timestamp can fall just after a VFR clip's last
-                            // presentation timestamp. Walk back by less than a frame on
-                            // normal sources and use the last decodable frame at clip end.
-                            for step in 0..32 {
-                                let seek = (time - step as f32 / 120.).max(0.).to_string();
-                                let output = std::process::Command::new("ffmpeg")
-                                    .args(["-v", "error", "-ss", &seek, "-i"])
-                                    .arg(&source)
-                                    .args([
-                                        "-frames:v",
-                                        "1",
-                                        "-f",
-                                        "image2pipe",
-                                        "-c:v",
-                                        "png",
-                                        "-",
-                                    ])
-                                    .output()?;
-                                if !output.status.success() {
-                                    bail!(
-                                        "Video decode failed at {time:.6}s: {}",
-                                        String::from_utf8_lossy(&output.stderr)
-                                    );
+                            // Identical presentation times reuse one decoded frame.
+                            let ms = (time * 1000.).round() as i32;
+                            if let Some(hit) =
+                                self.video.get(&(source.clone(), ms))
+                            {
+                                hit.clone()
+                            } else {
+                                let mut decoded = None;
+                                // A requested timestamp can fall just after a VFR clip's last
+                                // presentation timestamp. Walk back by less than a frame on
+                                // normal sources and use the last decodable frame at clip end.
+                                for step in 0..32 {
+                                    let seek =
+                                        (time - step as f32 / 120.).max(0.).to_string();
+                                    let output = std::process::Command::new("ffmpeg")
+                                        .args(["-v", "error", "-ss", &seek, "-i"])
+                                        .arg(&source)
+                                        .args([
+                                            "-frames:v",
+                                            "1",
+                                            "-f",
+                                            "image2pipe",
+                                            "-c:v",
+                                            "png",
+                                            "-",
+                                        ])
+                                        .output()?;
+                                    if !output.status.success() {
+                                        bail!(
+                                            "Video decode failed at {time:.6}s: {}",
+                                            String::from_utf8_lossy(&output.stderr)
+                                        );
+                                    }
+                                    if !output.stdout.is_empty() {
+                                        decoded = Some(
+                                            image::load_from_memory(&output.stdout)?
+                                                .into_rgba8(),
+                                        );
+                                        break;
+                                    }
                                 }
-                                if !output.stdout.is_empty() {
-                                    decoded =
-                                        Some(image::load_from_memory(&output.stdout)?.into_rgba8());
-                                    break;
+                                let pixmap = Arc::new(rgba_to_pixmap(decoded.context(
+                                    "No video frame near the requested presentation timestamp",
+                                )?)?);
+                                if self.video.len() >= 64 {
+                                    self.video.clear();
                                 }
+                                self.video.insert((source, ms), pixmap.clone());
+                                pixmap
                             }
-                            decoded.context(
-                                "No video frame near the requested presentation timestamp",
-                            )?
+                        } else if let Some(hit) = self.images.get(&source) {
+                            hit.clone()
                         } else {
-                            image::open(safe_asset(&self.root, file)?)?.into_rgba8()
+                            let pixmap = Arc::new(rgba_to_pixmap(
+                                image::open(&source)?.into_rgba8(),
+                            )?);
+                            self.images.insert(source, pixmap.clone());
+                            pixmap
                         };
-                        let (iw, ih) = image.dimensions();
-                        let mut src = Pixmap::new(iw, ih).context("image allocation")?;
-                        for (dst, p) in src.pixels_mut().iter_mut().zip(image.pixels()) {
-                            *dst = tiny_skia::Color::from_rgba8(p[0], p[1], p[2], p[3])
-                                .premultiply()
-                                .to_color_u8();
-                        }
+                        let (iw, ih) = (src.width(), src.height());
                         let it = transform.pre_translate(x, y).pre_scale(
                             v(n, "width", iw as f32) / iw as f32,
                             v(n, "height", ih as f32) / ih as f32,
@@ -878,7 +916,7 @@ impl Renderer {
                         pix.draw_pixmap(
                             0,
                             0,
-                            src.as_ref(),
+                            src.as_ref().as_ref(),
                             &Default::default(),
                             it,
                             mask.as_deref(),
@@ -1004,6 +1042,29 @@ impl Renderer {
             }
         }
         encode_frame(&values, width, height)
+    }
+    /// Preview-only fast path: the same linear working pixels as `render`,
+    /// mapped through the same sRGB transfer to 8-bit for direct display.
+    /// Skips the 16-bit PNG encode (and the caller's PNG decode); export
+    /// pixels are untouched.
+    pub(crate) fn preview(
+        &mut self,
+        graph: &Value,
+        width: u32,
+        height: u32,
+        design: &Value,
+        fit: &str,
+    ) -> Result<Vec<u8>> {
+        let bytes = self.render_linear(graph, width, height, design, fit)?;
+        let mut out = Vec::with_capacity((width as usize) * (height as usize) * 4);
+        for px in bytes.chunks_exact(8) {
+            for c in 0..3 {
+                let bits = u16::from_le_bytes([px[c * 2], px[c * 2 + 1]]);
+                out.push((self.encode_lut[bits as usize] >> 8) as u8);
+            }
+            out.push(255);
+        }
+        Ok(out)
     }
     fn sampled(
         &mut self,
