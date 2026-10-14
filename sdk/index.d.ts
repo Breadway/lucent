@@ -70,11 +70,26 @@ export function circle(
   color: string,
   props?: Record<string, unknown>,
 ): Node;
+export interface TextProps {
+  font?: string;
+  size?: number;
+  color?: string;
+  weight?: number;
+  style?: string;
+  lineHeight?: number;
+  align?: "left" | "center" | "right";
+  wrapWidth?: number;
+  kerning?: boolean;
+  ligatures?: boolean;
+  /** Extra advance after every character, in design px. Default 0. */
+  letterSpacing?: number;
+  [key: string]: unknown;
+}
 export function text(
   value: string,
   x: number,
   y: number,
-  props?: Record<string, unknown>,
+  props?: TextProps,
 ): Node;
 export function image(
   src: string,

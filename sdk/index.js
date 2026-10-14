@@ -99,6 +99,10 @@ export const circle = (x, y, radius, color, props = {}) => ({
   color,
   ...props,
 });
+// A direct text leaf. Accepts font, size, color, weight, style, lineHeight,
+// align ("left", "center" or "right"), wrapWidth, kerning, ligatures and
+// letterSpacing (extra advance after every character, in design px, default 0).
+// Spaced text needs the "text-letter-spacing" native capability.
 export const text = (value, x, y, props = {}) => ({
   type: "text",
   text: value,

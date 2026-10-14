@@ -15,6 +15,7 @@
       "clipping",
       "paths",
       "text",
+      "text-letter-spacing",
       "images",
       "cameras",
       "transitions",

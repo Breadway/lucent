@@ -492,7 +492,7 @@ impl Gpu {
                 },
             );
             let hardware = !matches!(adapter_info.device_type, wgpu::DeviceType::Cpu);
-            let info = json!({"available":true,"apiVersion":"0.1.0","features":["groups","transforms","clipping","paths","text","images","cameras","transitions","video","shader-wgsl","supersampling","motion-blur","svg"],"adapter":adapter_info.name,"driver":adapter_info.driver_info,"hardware":hardware,"maxDimensions":limits.max_texture_dimension_2d,"textureFormats":["rgba16float"],"workingBitDepth":16,"rasterization":"Rust tiny-skia/Cosmic Text; linear-light wgpu composition"});
+            let info = json!({"available":true,"apiVersion":"0.1.0","features":["groups","transforms","clipping","paths","text","text-letter-spacing","images","cameras","transitions","video","shader-wgsl","supersampling","motion-blur","svg"],"adapter":adapter_info.name,"driver":adapter_info.driver_info,"hardware":hardware,"maxDimensions":limits.max_texture_dimension_2d,"textureFormats":["rgba16float"],"workingBitDepth":16,"rasterization":"Rust tiny-skia/Cosmic Text; linear-light wgpu composition"});
             Ok(Self {
                 device,
                 queue,
@@ -892,9 +892,10 @@ impl Renderer {
         self.clips.insert(source.clone(), predecoded.clone());
         predecoded
     }
-    /// Rendering-state hash for a text leaf: node content plus the effective
-    /// transform and output size. Opacity is applied later on the GPU, and
-    /// masked text is never cached, so equal keys rasterise identically.
+    /// Rendering-state hash for a text leaf: node content (including
+    /// `letterSpacing`) plus the effective transform and output size.
+    /// Opacity is applied later on the GPU, and masked text is never
+    /// cached, so equal keys rasterise identically.
     fn text_key(n: &Value, transform: &Transform, width: u32, height: u32) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -908,6 +909,44 @@ impl Renderer {
         width.hash(&mut h);
         height.hash(&mut h);
         h.finish()
+    }
+
+    /// Shaped buffer for a text leaf. `letterSpacing` (design px) is added
+    /// after every glyph, so the line width includes it exactly as
+    /// `svg::measure_text` does. Cosmic Text takes tracking in em. Non-zero
+    /// spacing turns ligatures off (as CSS does) so each character gets its
+    /// own spacing; zero spacing leaves shaping untouched.
+    fn text_buffer(fonts: &mut FontSystem, n: &Value, family: &str, text: &str) -> Buffer {
+        let font_size = v(n, "size", 32.);
+        let spacing = v(n, "letterSpacing", 0.);
+        let mut buffer = Buffer::new(
+            fonts,
+            Metrics::new(font_size, v(n, "lineHeight", font_size * 1.2)),
+        );
+        buffer.set_size(fonts, n["wrapWidth"].as_f64().map(|x| x as f32), None);
+        let mut features = cosmic_text::FontFeatures::new();
+        if n["kerning"] == false {
+            features.disable(cosmic_text::FeatureTag::KERNING);
+        }
+        if n["ligatures"] == false || spacing != 0. {
+            features.disable(cosmic_text::FeatureTag::STANDARD_LIGATURES);
+            features.disable(cosmic_text::FeatureTag::CONTEXTUAL_LIGATURES);
+        }
+        let mut attrs = Attrs::new()
+            .family(Family::Name(family))
+            .weight(cosmic_text::Weight(v(n, "weight", 400.) as u16))
+            .style(if n["style"] == "italic" {
+                cosmic_text::Style::Italic
+            } else {
+                cosmic_text::Style::Normal
+            })
+            .font_features(features);
+        if spacing != 0. && font_size > 0. {
+            attrs = attrs.letter_spacing(spacing / font_size);
+        }
+        buffer.set_text(fonts, text, &attrs, Shaping::Advanced);
+        buffer.shape_until_scroll(fonts, false);
+        buffer
     }
 
     pub(crate) fn new(root: &Path, manifest: &Value) -> Result<Self> {
@@ -1114,35 +1153,7 @@ impl Renderer {
                             bail!("Undeclared font {family}");
                         }
                         let text = n["text"].as_str().context("text")?;
-                        let font_size = v(n, "size", 32.);
-                        let mut buffer = Buffer::new(
-                            &mut self.fonts,
-                            Metrics::new(font_size, v(n, "lineHeight", font_size * 1.2)),
-                        );
-                        buffer.set_size(
-                            &mut self.fonts,
-                            n["wrapWidth"].as_f64().map(|x| x as f32),
-                            None,
-                        );
-                        let mut features = cosmic_text::FontFeatures::new();
-                        if n["kerning"] == false {
-                            features.disable(cosmic_text::FeatureTag::KERNING);
-                        }
-                        if n["ligatures"] == false {
-                            features.disable(cosmic_text::FeatureTag::STANDARD_LIGATURES);
-                            features.disable(cosmic_text::FeatureTag::CONTEXTUAL_LIGATURES);
-                        }
-                        let attrs = Attrs::new()
-                            .family(Family::Name(family))
-                            .weight(cosmic_text::Weight(v(n, "weight", 400.) as u16))
-                            .style(if n["style"] == "italic" {
-                                cosmic_text::Style::Italic
-                            } else {
-                                cosmic_text::Style::Normal
-                            })
-                            .font_features(features);
-                        buffer.set_text(&mut self.fonts, text, &attrs, Shaping::Advanced);
-                        buffer.shape_until_scroll(&mut self.fonts, false);
+                        let buffer = Self::text_buffer(&mut self.fonts, n, family, text);
                         if buffer.layout_runs().flat_map(|run| run.glyphs).any(|g| {
                             g.glyph_id == 0
                                 || self.fonts.db().face(g.font_id).is_none_or(|face| {
@@ -1773,4 +1784,78 @@ pub(crate) fn vm(
         )
     })?;
     Ok((runtime, context, deadline))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_fonts() -> FontSystem {
+        let mut db = cosmic_text::fontdb::Database::new();
+        db.load_font_data(
+            fs::read(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/examples/conformance/DejaVuSans.ttf"
+            ))
+            .expect("conformance font"),
+        );
+        FontSystem::new_with_locale_and_db("en-US".into(), db)
+    }
+
+    fn line_width(fonts: &mut FontSystem, n: &Value) -> f32 {
+        let text = n["text"].as_str().expect("text");
+        let buffer = Renderer::text_buffer(fonts, n, "DejaVu Sans", text);
+        buffer.layout_runs().next().map(|r| r.line_w).unwrap_or(0.)
+    }
+
+    #[test]
+    fn spaced_line_is_wider_by_spacing_per_character() {
+        let mut fonts = test_fonts();
+        let text = "TRACKED TYPE";
+        let chars = text.chars().count() as f32;
+        let plain = json!({"type":"text","text":text,"font":"DejaVu Sans","size":28.0});
+        let spaced =
+            json!({"type":"text","text":text,"font":"DejaVu Sans","size":28.0,"letterSpacing":4.0});
+        let (plain_w, spaced_w) = (
+            line_width(&mut fonts, &plain),
+            line_width(&mut fonts, &spaced),
+        );
+        assert!(spaced_w > plain_w, "spaced {spaced_w} vs plain {plain_w}");
+        let expected = 4.0 * chars;
+        assert!(
+            (spaced_w - plain_w - expected).abs() < 1.0,
+            "spaced {spaced_w} vs plain {plain_w}, expected +{expected}"
+        );
+    }
+
+    #[test]
+    fn zero_spacing_matches_absent_prop() {
+        let mut fonts = test_fonts();
+        let plain = json!({"type":"text","text":"TRACKED TYPE","font":"DejaVu Sans","size":28.0});
+        let zero = json!({"type":"text","text":"TRACKED TYPE","font":"DejaVu Sans","size":28.0,"letterSpacing":0.0});
+        assert_eq!(
+            line_width(&mut fonts, &plain),
+            line_width(&mut fonts, &zero)
+        );
+    }
+
+    #[test]
+    fn cache_key_covers_letter_spacing() {
+        let plain = json!({"type":"text","text":"TRACKED TYPE","font":"DejaVu Sans","size":28.0});
+        let spaced = json!({"type":"text","text":"TRACKED TYPE","font":"DejaVu Sans","size":28.0,"letterSpacing":4.0});
+        let transform = Transform::identity();
+        assert_ne!(
+            Renderer::text_key(&plain, &transform, 640, 360),
+            Renderer::text_key(&spaced, &transform, 640, 360)
+        );
+    }
+
+    #[test]
+    fn scenes_requiring_letter_spacing_validate() {
+        let scenes = json!([{"id":"kicker","renderer":"portable","requires":["text","text-letter-spacing"]}]);
+        let with = json!({"features":["groups","text","text-letter-spacing"]});
+        assert!(validate_native_scenes(&scenes, &with).is_ok());
+        let without = json!({"features":["groups","text"]});
+        assert!(validate_native_scenes(&scenes, &without).is_err());
+    }
 }
