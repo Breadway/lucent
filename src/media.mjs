@@ -4,7 +4,10 @@ import os from "node:os";
 import { run, subprocess, aborter, lease } from "./process.mjs";
 import { ENGINE } from "./server.mjs";
 import { hash, hashFile, atomicJSON, VERSION } from "./project.mjs";
+// LUCENT_NATIVE_BIN pins an explicit binary; otherwise the newest build of
+// target/{release,debug} wins, which can be stale until `cargo build` is rerun.
 export const nativeBinary = () =>
+  process.env.LUCENT_NATIVE_BIN ||
   ["release", "debug"]
     .map((mode) => path.join(ENGINE, "target", mode, "lucent"))
     .filter((file) => fs.existsSync(file))
