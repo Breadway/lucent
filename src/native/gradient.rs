@@ -28,6 +28,12 @@ type Rgba = [f32; 4];
 
 const TOLERANCE: f32 = 0.25;
 const MAX_DEPTH: u32 = 10;
+/// Shared descriptor limits, mirrored by web/gradient.js.
+const MAX_AUTHORED_STOPS: usize = 4096;
+const MAX_EXPANDED_STOPS: usize = 65_536;
+/// Coordinates must stay representable in the native f32 geometry and are restricted
+/// to the same domain in the browser to keep descriptor validation identical.
+const MAX_COORDINATE: f64 = f32::MAX as f64;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub(super) enum Space {
@@ -48,7 +54,9 @@ pub(super) struct Spec {
 
 fn number(fill: &Value, key: &str, what: &str) -> Result<f32> {
     match fill[key].as_f64() {
-        Some(x) if x.is_finite() && (x as f32).is_finite() => Ok(x as f32),
+        Some(x) if x.is_finite() && x.abs() <= MAX_COORDINATE && (x as f32).is_finite() => {
+            Ok(x as f32)
+        }
         _ => bail!("{what} {key} must be a finite number"),
     }
 }
@@ -60,11 +68,14 @@ fn parse_stops(fill: &Value) -> Result<Vec<(f32, Rgba)>> {
     if values.len() < 2 {
         bail!("gradient needs at least two stops");
     }
-    let mut previous = 0.0f32;
+    if values.len() > MAX_AUTHORED_STOPS {
+        bail!("gradient authored stops exceed maximum of {MAX_AUTHORED_STOPS}");
+    }
+    let mut previous = 0.0f64;
     let mut stops = Vec::with_capacity(values.len());
     for (i, stop) in values.iter().enumerate() {
         let offset = match stop["offset"].as_f64() {
-            Some(x) if (0.0..=1.0).contains(&x) => x as f32,
+            Some(x) if (0.0..=1.0).contains(&x) => x,
             _ => bail!("gradient stop {i} offset must be a number in [0, 1]"),
         };
         if offset < previous {
@@ -79,7 +90,7 @@ fn parse_stops(fill: &Value) -> Result<Vec<(f32, Rgba)>> {
             bail!("gradient stop {i} colour must be #RRGGBB or #RRGGBBAA");
         }
         let c = color(text)?;
-        stops.push((offset, c.map(|v| v as f32 / 255.)));
+        stops.push((offset as f32, c.map(|v| v as f32 / 255.)));
     }
     Ok(stops)
 }
@@ -191,15 +202,19 @@ impl Segment {
         (c0, c1): (Rgba, Rgba),
         depth: u32,
         out: &mut Vec<(f32, Rgba)>,
-    ) {
+    ) -> Result<()> {
         let um = (u0 + u1) / 2.;
         let cm = self.at(um);
         if depth >= MAX_DEPTH || chord_error(cm, c0, c1) <= TOLERANCE {
-            return;
+            return Ok(());
         }
-        self.subdivide((o0, o1), (u0, um), (c0, cm), depth + 1, out);
+        self.subdivide((o0, o1), (u0, um), (c0, cm), depth + 1, out)?;
+        if out.len() >= MAX_EXPANDED_STOPS {
+            bail!("gradient expanded stops exceed maximum of {MAX_EXPANDED_STOPS}");
+        }
         out.push((o0 + (o1 - o0) * um, cm));
-        self.subdivide((o0, o1), (um, u1), (cm, c1), depth + 1, out);
+        self.subdivide((o0, o1), (um, u1), (cm, c1), depth + 1, out)?;
+        Ok(())
     }
 }
 
@@ -217,29 +232,33 @@ fn chord_error(mid: Rgba, c0: Rgba, c1: Rgba) -> f32 {
 
 /// The stops tiny-skia should interpolate straight in sRGB so the result follows
 /// `space` with premultiplied alpha. Opaque sRGB stops come back unchanged.
-pub(super) fn expand(stops: &[(f32, Rgba)], space: Space) -> Vec<(f32, Rgba)> {
+pub(super) fn expand(stops: &[(f32, Rgba)], space: Space) -> Result<Vec<(f32, Rgba)>> {
     let mut out: Vec<(f32, Rgba)> = Vec::new();
     let push = |out: &mut Vec<(f32, Rgba)>, stop: (f32, Rgba)| {
         if out.last() != Some(&stop) {
+            if out.len() >= MAX_EXPANDED_STOPS {
+                bail!("gradient expanded stops exceed maximum of {MAX_EXPANDED_STOPS}");
+            }
             out.push(stop);
         }
+        Ok(())
     };
     for pair in stops.windows(2) {
         let ((o0, c0), (o1, c1)) = (pair[0], pair[1]);
         let segment = Segment::new(c0, c1, space);
-        push(&mut out, (o0, segment.c0));
+        push(&mut out, (o0, segment.c0))?;
         if o1 > o0 && segment.c0 != segment.c1 {
-            segment.subdivide((o0, o1), (0., 1.), (segment.c0, segment.c1), 0, &mut out);
+            segment.subdivide((o0, o1), (0., 1.), (segment.c0, segment.c1), 0, &mut out)?;
         }
-        push(&mut out, (o1, segment.c1));
+        push(&mut out, (o1, segment.c1))?;
     }
-    out
+    Ok(out)
 }
 
 impl Spec {
     fn paint(&self) -> Result<Paint<'static>> {
         let mut stops = Vec::new();
-        for (offset, c) in expand(&self.stops, self.space) {
+        for (offset, c) in expand(&self.stops, self.space)? {
             let c = Color::from_rgba(
                 c[0].clamp(0., 1.),
                 c[1].clamp(0., 1.),
@@ -316,14 +335,14 @@ mod tests {
     #[test]
     fn opaque_srgb_stops_pass_through() {
         let spec = parse(&bw("srgb")).unwrap();
-        assert_eq!(expand(&spec.stops, spec.space), spec.stops);
+        assert_eq!(expand(&spec.stops, spec.space).unwrap(), spec.stops);
     }
 
     #[test]
     fn linear_midpoint_is_the_linear_light_value() {
         let spec = parse(&bw("linear")).unwrap();
         assert_eq!(spec.space, Space::Linear);
-        let dense = expand(&spec.stops, spec.space);
+        let dense = expand(&spec.stops, spec.space).unwrap();
         let mid = chord(&dense, 0.5);
         // 0.5 in linear light encodes to 0.7354 (sRGB 187.5), not the 0.5 of sRGB mixing.
         assert!((mid[0] * 255. - 187.5).abs() < 0.3, "{}", mid[0] * 255.);
@@ -356,7 +375,7 @@ mod tests {
         for (a, b) in cases {
             let c = |s: &str| color(s).unwrap().map(|v| v as f32 / 255.);
             let stops = [(0., c(a)), (1., c(b))];
-            let dense = expand(&stops, Space::Linear);
+            let dense = expand(&stops, Space::Linear).unwrap();
             let segment = Segment::new(stops[0].1, stops[1].1, Space::Linear);
             let mut worst = 0f32;
             for k in 0..=4000 {
@@ -379,7 +398,7 @@ mod tests {
     fn transparent_stops_leave_no_dark_fringe() {
         let stops = [(0., [1., 1., 1., 1.]), (1., [0., 0., 0., 0.])];
         for space in [Space::Linear, Space::Srgb] {
-            let dense = expand(&stops, space);
+            let dense = expand(&stops, space).unwrap();
             assert_eq!(dense.len(), 2, "{space:?}");
             for (_, c) in &dense {
                 assert!(c[..3].iter().all(|v| *v == 1.), "{space:?} {c:?}");
@@ -395,8 +414,23 @@ mod tests {
         let dense = expand(
             &[(0., red), (0.5, red), (0.5, blue), (1., blue)],
             Space::Linear,
-        );
+        )
+        .unwrap();
         assert_eq!(dense, vec![(0., red), (0.5, red), (0.5, blue), (1., blue)]);
+    }
+
+    #[test]
+    fn aggregate_expansion_budget_is_checked_during_expansion() {
+        let black = [0., 0., 0., 1.];
+        let white = [1., 1., 1., 1.];
+        let stops = (0..=4095)
+            .map(|i| (i as f32 / 4095., if i % 2 == 0 { black } else { white }))
+            .collect::<Vec<_>>();
+        let error = expand(&stops, Space::Linear).unwrap_err();
+        assert_eq!(
+            format!("{error:#}"),
+            "gradient expanded stops exceed maximum of 65536"
+        );
     }
 
     #[test]
@@ -421,12 +455,29 @@ mod tests {
         );
         assert_eq!(
             err(linear(
+                json!({"stops":[{"offset":0.50000001,"color":"#000000"},{"offset":0.5,"color":"#ffffff"}]})
+            )),
+            "gradient stop offsets must not decrease (stop 1)"
+        );
+        let too_many = (0..=MAX_AUTHORED_STOPS)
+            .map(|i| json!({"offset": i as f64 / MAX_AUTHORED_STOPS as f64, "color":"#000000"}))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            err(linear(json!({"stops":too_many}))),
+            "gradient authored stops exceed maximum of 4096"
+        );
+        assert_eq!(
+            err(linear(
                 json!({"stops":[{"offset":0,"color":"#000000"},{"offset":1.5,"color":"#ffffff"}]})
             )),
             "gradient stop 1 offset must be a number in [0, 1]"
         );
         assert_eq!(
             err(linear(json!({"x2":null}))),
+            "linear gradient x2 must be a finite number"
+        );
+        assert_eq!(
+            err(linear(json!({"x2":1e40}))),
             "linear gradient x2 must be a finite number"
         );
         assert_eq!(

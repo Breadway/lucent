@@ -4,6 +4,10 @@
 // blend follow it to within TOLERANCE 8-bit levels. Opaque sRGB stops pass through.
 const TOLERANCE = 0.25;
 const MAX_DEPTH = 10;
+// Keep descriptor and aggregate expansion bounds aligned with native/gradient.rs.
+const MAX_AUTHORED_STOPS = 4096;
+const MAX_EXPANDED_STOPS = 65536;
+const MAX_COORDINATE = 3.4028234663852886e38;
 const linear = (v) => (v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4);
 const encoded = (v) => {
   v = Math.min(1, Math.max(0, v));
@@ -13,6 +17,8 @@ const encoded = (v) => {
 function number(fill, key, what) {
   if (typeof fill[key] !== "number" || !Number.isFinite(fill[key]))
     throw Error(`${what} ${key} must be a finite number`);
+  if (Math.abs(fill[key]) > MAX_COORDINATE)
+    throw Error(`${what} ${key} must be a finite number`);
   return fill[key];
 }
 
@@ -20,6 +26,8 @@ function parseStops(fill) {
   if (!Array.isArray(fill.stops))
     throw Error("gradient stops must be an array");
   if (fill.stops.length < 2) throw Error("gradient needs at least two stops");
+  if (fill.stops.length > MAX_AUTHORED_STOPS)
+    throw Error(`gradient authored stops exceed maximum of ${MAX_AUTHORED_STOPS}`);
   let previous = 0;
   return fill.stops.map((stop, i) => {
     const offset = stop?.offset;
@@ -108,7 +116,11 @@ export function expandStops(stops, space) {
   const same = (a, b) =>
     a && a[0] === b[0] && a[1].every((v, i) => v === b[1][i]);
   const push = (stop) => {
-    if (!same(out[out.length - 1], stop)) out.push(stop);
+    if (!same(out[out.length - 1], stop)) {
+      if (out.length >= MAX_EXPANDED_STOPS)
+        throw Error(`gradient expanded stops exceed maximum of ${MAX_EXPANDED_STOPS}`);
+      out.push(stop);
+    }
   };
   for (let s = 0; s + 1 < stops.length; s++) {
     const [o0, a] = stops[s];
@@ -120,6 +132,8 @@ export function expandStops(stops, space) {
       const cm = seg.at(um);
       if (depth >= MAX_DEPTH || chordError(cm, c0, c1) <= TOLERANCE) return;
       split(u0, um, c0, cm, depth + 1);
+      if (out.length >= MAX_EXPANDED_STOPS)
+        throw Error(`gradient expanded stops exceed maximum of ${MAX_EXPANDED_STOPS}`);
       out.push([o0 + (o1 - o0) * um, cm]);
       split(um, u1, cm, c1, depth + 1);
     };

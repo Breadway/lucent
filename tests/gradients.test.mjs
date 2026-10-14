@@ -221,6 +221,45 @@ test("web gradient helper mirrors the engine's expansion", () => {
   assert.equal(expandStops(srgb.stops, srgb.space).length, 2);
 });
 
+test("shared descriptor limits reject authored and aggregate stop overflow", () => {
+  const atAuthoredLimit = Array.from({ length: 4096 }, (_, i) => [i / 4095, "#000000"]);
+  assert.equal(parseGradient(linearFill(0, 0, 10, 0, atAuthoredLimit)).stops.length, 4096);
+  const authored = Array.from({ length: 4097 }, (_, i) => [i / 4096, "#000000"]);
+  assert.throws(
+    () => parseGradient(linearFill(0, 0, 10, 0, authored)),
+    { message: "gradient authored stops exceed maximum of 4096" },
+  );
+  // Each alternating segment needs many linear-light subdivisions; the aggregate
+  // budget must stop expansion even though authored count is within its separate cap.
+  const alternating = Array.from({ length: 4096 }, (_, i) => [
+    i / 4095,
+    i % 2 ? "#ffffff" : "#000000",
+  ]);
+  const spec = parseGradient(linearFill(0, 0, 10, 0, alternating));
+  const atExpandedLimit = Array.from({ length: 65536 }, (_, i) => [i / 65535, [0, 0, 0, 1]]);
+  assert.equal(expandStops(atExpandedLimit, "srgb").length, 65536);
+  assert.throws(
+    () => expandStops(spec.stops, spec.space),
+    { message: "gradient expanded stops exceed maximum of 65536" },
+  );
+});
+
+test("gradient offsets are ordered before native f32 narrowing and geometry domain is shared", () => {
+  const decreasing = linearFill(0, 0, 10, 0, [
+    [0.50000001, "#000000"],
+    [0.5, "#ffffff"],
+  ]);
+  assert.throws(
+    () => parseGradient(decreasing),
+    { message: "gradient stop offsets must not decrease (stop 1)" },
+  );
+  assert.throws(
+    () => parseGradient(linearFill(0, 0, 1e40, 0, BW)),
+    { message: "linear gradient x2 must be a finite number" },
+  );
+  assert.doesNotThrow(() => parseGradient(linearFill(0, 0, 1e30, 0, BW)));
+});
+
 const NAN = Number.NaN;
 const stops2 = BW;
 const INVALID = [
@@ -238,6 +277,14 @@ const INVALID = [
     "gradient stop offsets must not decrease (stop 1)",
   ],
   [
+    "f64-decreasing offsets lost by f32 narrowing",
+    linearFill(0, 0, 10, 0, [
+      [0.50000001, "#000000"],
+      [0.5, "#ffffff"],
+    ]),
+    "gradient stop offsets must not decrease (stop 1)",
+  ],
+  [
     "offset out of range",
     linearFill(0, 0, 10, 0, [
       [0, "#000000"],
@@ -248,6 +295,11 @@ const INVALID = [
   [
     "non-finite linear coordinate",
     linearFill(0, 0, NAN, 0, stops2),
+    "linear gradient x2 must be a finite number",
+  ],
+  [
+    "coordinate outside shared f32 domain",
+    linearFill(0, 0, 1e40, 0, stops2),
     "linear gradient x2 must be a finite number",
   ],
   [
