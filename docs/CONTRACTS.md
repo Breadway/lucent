@@ -20,7 +20,7 @@ GPU bypasses require demonstrated equivalent colour and precision, explicit reso
 
 ## Typography and determinism
 
-Portable projects embed font files with family, weight and style. Missing files or undeclared font families fail. System fallback is not a deterministic export contract. Line wrapping, direction, size, line height, alignment and kerning are explicit scene properties. Legacy browser adapters retain their original typography. Native shaping uses pinned Cosmic Text.
+Portable projects embed font files with family, weight and style. Missing files or undeclared font families fail. System fallback is not a deterministic export contract. Line wrapping, direction, size, line height, alignment, kerning and letter spacing are explicit scene properties. Direct text leaves take `letterSpacing` (design px after every character, default 0) and need the `text-letter-spacing` native capability when it is non-zero. Legacy browser adapters retain their original typography. Native shaping uses pinned Cosmic Text.
 
 Within pinned software, assets, fonts, seeds and environment, arbitrary seeking must reproduce scene state. Backend rasterization differences are measured; cross-backend bit identity is not promised. Software Chromium can change a few text-edge samples during glyph-cache warmup; verification records both exact equality and maximum per-channel error, and this must be resolved or explicitly reported rather than hidden.
 

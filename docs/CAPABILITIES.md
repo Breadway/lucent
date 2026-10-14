@@ -16,6 +16,7 @@ The engine preserves the originals through browser compatibility adapters. Film 
 | Mastering and AV1/H.264 delivery                                           | Both           | verified common encode/mux path                     |
 | H.265, 4K/1440p/1200p/custom dimensions                                    | New            | common export settings                              |
 | Portable typed scenes and dependencies                                     | New            | JS/TS SDK and versioned manifest                    |
+| Native tracked type (`letterSpacing` on direct text leaves)                | New            | native `text` leaf, `text-letter-spacing` feature   |
 | Colour-managed multi-deliverable export                                    | New            | Rust frame boundary and FFmpeg conversion           |
 | Quotas, key pools and durable TTS caching                                  | New            | film-linked scripts, SQLite ledger                  |
 
