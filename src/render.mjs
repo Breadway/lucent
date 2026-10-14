@@ -56,6 +56,44 @@ function quarantine(file, root, kind) {
     if (e.code !== "ENOENT") throw e;
   }
 }
+export function pruneChunkFrames(dir, a, b) {
+  for (let f = a; f < b; f++)
+    fs.rmSync(path.join(dir, `${f}.png`), { force: true });
+}
+export async function restoreChunk({
+  dir,
+  a,
+  b,
+  key,
+  codecs,
+  settings,
+  verify: verifySegment = verify,
+}) {
+  const outputs = {};
+  for (const codec of codecs) {
+    const file = path.join(dir, `${codec}.mp4`),
+      record = file + ".json";
+    let old;
+    try {
+      old = JSON.parse(fs.readFileSync(record));
+    } catch {
+      return null;
+    }
+    if (old.key !== key) return null;
+    try {
+      if (old.checksum !== hashFile(file)) return null;
+    } catch {
+      return null;
+    }
+    try {
+      await verifySegment(file, { ...settings, frames: b - a, codec });
+    } catch {
+      return null;
+    }
+    outputs[codec] = file;
+  }
+  return outputs;
+}
 
 export async function render(p, settings, { benchmark = false } = {}) {
   const stopMemory = memoryMonitor();
@@ -116,6 +154,7 @@ export async function render(p, settings, { benchmark = false } = {}) {
         ...settings,
         work: undefined,
         out: undefined,
+        keepFrames: undefined,
         browserVersion,
         graphics: environment.acceleration,
         ffmpeg: environment.ffmpeg,
@@ -241,6 +280,30 @@ export async function render(p, settings, { benchmark = false } = {}) {
               entries = [];
             }
           }
+          if (!benchmark) {
+            const restored = await restoreChunk({
+              dir,
+              a,
+              b,
+              key,
+              codecs,
+              settings,
+            });
+            if (restored) {
+              chunkResults[index] = restored;
+              chunkIntervals.push([chunkStarted, performance.now()]);
+              completed += b - a;
+              atomicJSON(path.join(root, "status.json"), {
+                state: "running",
+                key,
+                done: completed,
+                total: last - first,
+              });
+              if (!settings.json)
+                console.error(`${completed}/${last - first} frames verified`);
+              continue;
+            }
+          }
           const stat = fs.statfsSync(dir);
           if (
             stat.bavail * stat.bsize <
@@ -322,6 +385,7 @@ export async function render(p, settings, { benchmark = false } = {}) {
             }
             outputs[codec] = file;
           }
+          if (!settings.keepFrames) pruneChunkFrames(dir, a, b);
           chunkResults[index] = outputs;
           chunkIntervals.push([chunkStarted, performance.now()]);
           completed += b - a;

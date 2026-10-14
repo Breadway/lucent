@@ -10,22 +10,31 @@ export const nativeBinary = () =>
     .filter((file) => fs.existsSync(file))
     .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs)[0] ||
   path.join(ENGINE, "target/release/lucent");
-export async function probe(file, count = true) {
+export async function probe(file, count = true, timeout = 120000) {
   return JSON.parse(
-    await run("ffprobe", [
-      "-v",
-      "error",
-      ...(count ? ["-count_frames"] : []),
-      "-show_streams",
-      "-show_format",
-      "-of",
-      "json",
-      file,
-    ]),
+    await run(
+      "ffprobe",
+      [
+        "-v",
+        "error",
+        ...(count ? ["-count_frames"] : []),
+        "-show_streams",
+        "-show_format",
+        "-of",
+        "json",
+        file,
+      ],
+      { timeout },
+    ),
   ).streams;
 }
 export async function verify(file, { width, height, frames, fps, codec }) {
-  const s = (await probe(file)).find((s) => s.codec_type === "video");
+  const timeout = Number.isFinite(frames)
+    ? Math.min(1800000, 120000 + Math.ceil(frames) * 50)
+    : 120000;
+  const s = (await probe(file, true, timeout)).find(
+    (s) => s.codec_type === "video",
+  );
   if (
     !s ||
     s.codec_name !== ({ h265: "hevc" }[codec] || codec) ||
