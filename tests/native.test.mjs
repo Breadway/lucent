@@ -5,6 +5,42 @@ import { PNG } from "pngjs";
 import { project, atomicJSON } from "../src/project.mjs";
 import { openNative } from "../src/native.mjs";
 import { openFilm } from "../src/browser.mjs";
+test("frame grain is deterministic, order-independent, and zero is a bypass", { skip: !process.env.FILM_NATIVE, timeout: 120000 }, async () => {
+  const p = project("examples/conformance/conformance.film.json");
+  p.entry = "grain-fixture.js";
+  const scene = `background:"#444444",scenes:[{id:"flat",duration:2,renderer:"portable",frame:()=>rect(0,0,640,360,"#444444")}]`;
+  const film = (grain) => `import {defineFilm,rect} from "@breadway/lucent";export default defineFilm({grain:${grain},${scene}});`;
+  fs.writeFileSync(`${p.root}/${p.entry}`, film("undefined"));
+  try {
+    const plain = await openNative(p, { size: [64, 36], fps: 30 });
+    let flat;
+    try {
+      flat = PNG.sync.read((await plain.capture(1 / 30)).png).data;
+    } finally { await plain.close(); }
+    fs.writeFileSync(`${p.root}/${p.entry}`, film("{seed:29,opacity:0,width:16,height:9}"));
+    const disabled = await openNative(p, { size: [64, 36], fps: 30 });
+    try {
+      const off = PNG.sync.read((await disabled.capture(1 / 30)).png).data;
+      assert.deepEqual(off, flat, "opacity 0 must be pixel-identical to no grain");
+    } finally { await disabled.close(); }
+    fs.writeFileSync(`${p.root}/${p.entry}`, film("{seed:29,width:16,height:9}"));
+    const native = await openNative(p, { size: [64, 36], fps: 30 });
+    try {
+      const a = PNG.sync.read((await native.capture(1 / 30)).png).data;
+      await native.capture(0.5);
+      const b = PNG.sync.read((await native.capture(1 / 30)).png).data;
+      assert.deepEqual(a, b, "same output frame must rerender identically after seeks");
+      assert.notDeepEqual(a, flat, "enabled grain must change flat pixels");
+      const browser = await openFilm(p, { size: [64, 36], cpu: true, fps: 30 });
+      try {
+        const c = PNG.sync.read((await browser.capture(1 / 30, 1)).png).data;
+        let max = 0;
+        for (let i = 0; i < a.length; i++) max = Math.max(max, Math.abs(a[i] - c[i]));
+        assert.ok(max <= 2, `native/browser grain max channel error ${max}`);
+      } finally { await browser.close(); }
+    } finally { await native.close(); }
+  } finally { fs.rmSync(`${p.root}/${p.entry}`, { force: true }); }
+});
 test(
   "native/browser conformance, pinned native determinism and text bounds",
   { skip: !process.env.FILM_NATIVE, timeout: 120000 },

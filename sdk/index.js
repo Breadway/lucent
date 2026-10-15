@@ -21,6 +21,19 @@ export function defineFilm(film) {
       `Incompatible film SDK API ${film.apiVersion}; expected ${API_VERSION}`,
     );
   if (!film.scenes?.length) throw Error("Film needs scenes");
+  if (film.grain) {
+    const { seed, opacity = 0.055, width = 320, height = 180 } = film.grain;
+    if (
+      !Number.isSafeInteger(seed) || seed < -2147483648 || seed > 2147483647 ||
+      !Number.isFinite(opacity) || opacity < 0 || opacity > 1 ||
+      !Number.isInteger(width) || !Number.isInteger(height) ||
+      width < 1 || height < 1 || width > 4096 || height > 4096 ||
+      width * height > 1_048_576
+    ) throw Error("Invalid frame grain parameters");
+    for (const scene of film.scenes || []) {
+      scene.requires = [...new Set([...(scene.requires || []), "frame-grain"])];
+    }
+  }
   let cursor = 0;
   const ids = new Set();
   const scenes = film.scenes.map((s) => {
@@ -59,9 +72,12 @@ export function defineFilm(film) {
   });
   return { apiVersion: API_VERSION, ...film, scenes, duration: cursor };
 }
-export function frameGraph(film, t) {
+export function frameGraph(film, t, fps = 30) {
   return {
     background: film.background || "#000000",
+    // Grain is keyed by the output frame, not evaluation order or wall clock.
+    // At 30 fps, frame 0 is time 0 and frame 1 is time 1/30.
+    grain: film.grain ? { ...film.grain, frame: Math.floor(t * fps + 1e-9) } : undefined,
     children: film.scenes
       .filter((s) => t >= s.start && t < s.start + s.duration)
       .map((s) => ({

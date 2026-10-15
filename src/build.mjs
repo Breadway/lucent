@@ -9,7 +9,7 @@ export async function bundle(p, { native = false } = {}) {
   fs.mkdirSync(path.dirname(out), { recursive: true });
   await build({
     stdin: {
-      contents: `import authored from ${JSON.stringify(path.join(p.root, p.entry))};import {frameGraph,applyNarration} from ${JSON.stringify(path.join(ENGINE, "sdk/index.js"))};const film=applyNarration(authored,${JSON.stringify(narrationTiming(p)) || "undefined"});export default film;export const graph=t=>frameGraph(film,t);`,
+      contents: `import authored from ${JSON.stringify(path.join(p.root, p.entry))};import {frameGraph,applyNarration} from ${JSON.stringify(path.join(ENGINE, "sdk/index.js"))};const film=applyNarration(authored,${JSON.stringify(narrationTiming(p)) || "undefined"});export default film;export const graph=(t,fps=30)=>frameGraph(film,t,fps);`,
       resolveDir: p.root,
       sourcefile: "engine-entry.js",
     },

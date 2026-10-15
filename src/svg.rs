@@ -131,7 +131,8 @@ impl Svg {
 /// `overlay` mode at low opacity. The noise is a pure function of the seed, so frames
 /// stay reproducible. Expects an opaque surface.
 fn overlay_grain(pixmap: &mut sk::Pixmap, grain: &Value) {
-    let seed = grain["seed"].as_f64().unwrap_or(0.) as i64 as i32;
+    let seed = (grain["seed"].as_i64().unwrap_or(0) as i32)
+        .wrapping_add(grain["frame"].as_i64().unwrap_or(0) as i32);
     let opacity = grain["opacity"].as_f64().unwrap_or(0.055) as f32;
     let (gw, gh) = (
         grain["width"].as_u64().unwrap_or(320) as usize,

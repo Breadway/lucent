@@ -26,6 +26,7 @@ export interface Film {
   scenes: Scene[];
   seed?: number;
   background?: string;
+  grain?: { seed: number; opacity?: number; width?: number; height?: number };
 }
 
 export interface TtsProvider {

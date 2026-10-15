@@ -71,7 +71,7 @@ impl Viewer {
         }
         self.last_frame = frame;
         *self.deadline.lock().unwrap() = Instant::now() + Duration::from_secs(5);
-        let script = format!("JSON.stringify(__graph({}))", self.time);
+        let script = format!("JSON.stringify(__graph({}, 30))", self.time);
         let mut graph: Value =
             serde_json::from_str(&self.context.with(|ctx| ctx.eval::<String, _>(script))?)?;
         prepare_clips(&mut graph, self.time as f32)?;
