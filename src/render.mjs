@@ -60,6 +60,31 @@ export function pruneChunkFrames(dir, a, b) {
   for (let f = a; f < b; f++)
     fs.rmSync(path.join(dir, `${f}.png`), { force: true });
 }
+const DEFAULT_MAX_SEGMENT = 120;
+export function planChunks(first, last, chunk, workers = 1) {
+  const total = last - first;
+  if (!(total > 0)) return [];
+  if (chunk !== undefined) {
+    const out = [];
+    for (let a = first; a < last; a += chunk)
+      out.push({ a, b: Math.min(last, a + chunk) });
+    return out;
+  }
+  const count = Math.min(
+    total,
+    Math.max(workers, Math.ceil(total / DEFAULT_MAX_SEGMENT)),
+  );
+  const base = Math.floor(total / count),
+    extra = total % count,
+    out = [];
+  let a = first;
+  for (let i = 0; i < count; i++) {
+    const b = a + base + (i < extra ? 1 : 0);
+    out.push({ a, b });
+    a = b;
+  }
+  return out;
+}
 export async function restoreChunk({
   dir,
   a,
@@ -205,9 +230,8 @@ export async function render(p, settings, { benchmark = false } = {}) {
     );
     report.encoders = encoders;
     report.initialLoadMs = initialLoadMs;
-    const chunks = [];
-    for (let a = first; a < last; a += settings.chunk)
-      chunks.push({ a, b: Math.min(last, a + settings.chunk) });
+    const chunks = planChunks(first, last, settings.chunk, settings.workers);
+    report.chunkPlan = chunks.map((c) => c.b - c.a);
     let next = 0,
       completed = 0;
     report.encoderProbeMs = performance.now() - probeStart;
