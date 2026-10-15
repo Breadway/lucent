@@ -1,5 +1,6 @@
 import { frameGraph, sourceTime } from "/engine/sdk/index.js";
 import { LinearCompositor } from "./linear.js";
+import { gradientStyle } from "./gradient.js";
 export class GraphRenderer {
   constructor(canvas, film, manifest) {
     this.canvas = canvas;
@@ -143,7 +144,18 @@ export class GraphRenderer {
       c.clip();
     }
     if (n.effect) throw Error(`Unsupported portable effect: ${n.effect}`);
-    c.fillStyle = n.color || "#fff";
+    const stroked = n.type === "path" && n.stroke;
+    const fill =
+      !stroked && ["rect", "circle", "path"].includes(n.type)
+        ? n.fill
+        : undefined;
+    if (fill == null || typeof fill === "string") {
+      c.fillStyle = fill || n.color || "#fff";
+    } else if (fill && typeof fill === "object") {
+      c.fillStyle = gradientStyle(c, fill);
+    } else {
+      throw Error("fill must be a colour string or a gradient descriptor");
+    }
     switch (n.type) {
       case "rect":
         c.fillRect(n.x, n.y, n.width, n.height);

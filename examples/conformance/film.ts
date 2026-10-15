@@ -24,11 +24,34 @@ export default defineFilm({
         "paths",
         "text",
         "cameras",
+        "gradients",
       ],
       dependencies: ["DejaVuSans.ttf", "image.png", "clip.mp4"],
       frame(t) {
         return [
           rect(0, 0, 640, 360, "#0c1120"),
+          rect(0, 0, 200, 20, {
+            type: "linear",
+            x1: 0,
+            y1: 0,
+            x2: 200,
+            y2: 0,
+            stops: [
+              { offset: 0, color: "#000000" },
+              { offset: 1, color: "#ffffff" },
+            ],
+          }),
+          circle(210, 10, 10, {
+            type: "radial",
+            cx: 210,
+            cy: 10,
+            r: 10,
+            space: "srgb",
+            stops: [
+              { offset: 0, color: "#ffffff" },
+              { offset: 1, color: "#000000" },
+            ],
+          }),
           image("image.png", 530, 40, 80, 80),
           video("clip.mp4", 540, 110, 64, 64, {
             loop: true,

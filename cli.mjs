@@ -170,6 +170,7 @@ export async function main() {
             "video",
             "dom",
             "svg",
+            "gradients",
             "canvas",
             ...(film.caps.webgl ? ["webgl"] : []),
             ...(film.caps.webgpu ? ["webgpu"] : []),

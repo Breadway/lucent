@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
   "fixture": "operations",
-  "rmse": 9.755929687246624,
+  "rmse": 9.756154296544622,
   "maxError": 204,
-  "differingChannels": 31988,
+  "differingChannels": 35882,
   "native": {
     "adapter": "AMD Radeon 860M Graphics (RADV KRACKAN1)",
     "apiVersion": "0.1.0",
@@ -23,7 +23,8 @@
       "shader-wgsl",
       "supersampling",
       "motion-blur",
-      "svg"
+      "svg",
+      "gradients"
     ],
     "hardware": true,
     "maxDimensions": 16384,
