@@ -24,7 +24,9 @@
       "supersampling",
       "motion-blur",
       "svg",
-      "gradients"
+      "gradients",
+      "frame-grain",
+      "blend-lighter"
     ],
     "hardware": true,
     "maxDimensions": 16384,
