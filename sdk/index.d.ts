@@ -61,15 +61,15 @@ export function rect(
   y: number,
   width: number,
   height: number,
-  color: string,
-  props?: Record<string, unknown>,
+  fill: Fill,
+  props?: ShapeProps,
 ): Node;
 export function circle(
   x: number,
   y: number,
   radius: number,
-  color: string,
-  props?: Record<string, unknown>,
+  fill: Fill,
+  props?: ShapeProps,
 ): Node;
 export interface TextProps {
   font?: string;
@@ -84,6 +84,37 @@ export interface TextProps {
   ligatures?: boolean;
   /** Extra advance after every character, in design px. Default 0. */
   letterSpacing?: number;
+  [key: string]: unknown;
+}
+export interface GradientStop {
+  offset: number;
+  color: string;
+}
+/**
+ * Where stops are interpolated. "linear" (default) mixes in linear light, matching the
+ * engine's compositing; "srgb" mixes the encoded values like CSS and canvas gradients.
+ */
+export type GradientSpace = "linear" | "srgb";
+export interface LinearGradientFill {
+  type: "linear";
+  space?: GradientSpace;
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+  stops: GradientStop[];
+}
+export interface RadialGradientFill {
+  type: "radial";
+  space?: GradientSpace;
+  cx: number;
+  cy: number;
+  r: number;
+  stops: GradientStop[];
+}
+export type Fill = string | LinearGradientFill | RadialGradientFill;
+export interface ShapeProps {
+  fill?: Fill;
   [key: string]: unknown;
 }
 export function text(
@@ -102,7 +133,7 @@ export function image(
 ): Node;
 export function path(
   commands: Array<Array<string | number>>,
-  props?: Record<string, unknown>,
+  props?: ShapeProps,
 ): Node;
 export function video(
   src: string,

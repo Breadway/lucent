@@ -1,3 +1,4 @@
+mod gradient;
 use crate::svg::{self, FontDb, Svg};
 use anyhow::{bail, Context as _, Result};
 use cosmic_text::{Attrs, Buffer, Color, Family, FontSystem, Metrics, Shaping, SwashCache};
@@ -492,7 +493,7 @@ impl Gpu {
                 },
             );
             let hardware = !matches!(adapter_info.device_type, wgpu::DeviceType::Cpu);
-            let info = json!({"available":true,"apiVersion":"0.1.0","features":["groups","transforms","clipping","paths","text","text-letter-spacing","images","cameras","transitions","video","shader-wgsl","supersampling","motion-blur","svg","frame-grain"],"adapter":adapter_info.name,"driver":adapter_info.driver_info,"hardware":hardware,"maxDimensions":limits.max_texture_dimension_2d,"textureFormats":["rgba16float"],"workingBitDepth":16,"rasterization":"Rust tiny-skia/Cosmic Text; linear-light wgpu composition"});
+"svg","gradients","frame-grain"],"adapter":adapter_info.name,"driver":adapter_info.driver_info,"hardware":hardware,"maxDimensions":limits.max_texture_dimension_2d,"textureFormats":["rgba16float"],"workingBitDepth":16,"rasterization":"Rust tiny-skia/Cosmic Text; linear-light wgpu composition"});
             Ok(Self {
                 device,
                 queue,
@@ -1077,8 +1078,18 @@ impl Renderer {
                 let mut region: Option<Region> = None;
                 let t_raster = Instant::now();
                 let rgba = color(n["color"].as_str().unwrap_or("#ffffff"))?;
-                let mut paint = Paint::default();
-                paint.set_color_rgba8(rgba[0], rgba[1], rgba[2], rgba[3]);
+                // `fill` (colour or gradient) paints rect, circle and filled path leaves;
+                // strokes and every other leaf use the flat `color`.
+                let stroked = kind == "path" && n["stroke"].as_bool().unwrap_or(false);
+                let filled = matches!(kind, "rect" | "circle" | "path") && !stroked;
+                let paint = match filled.then(|| gradient::paint(n)).transpose()?.flatten() {
+                    Some(paint) => paint,
+                    None => {
+                        let mut paint = Paint::default();
+                        paint.set_color_rgba8(rgba[0], rgba[1], rgba[2], rgba[3]);
+                        paint
+                    }
+                };
                 let x = v(n, "x", 0.);
                 let y = v(n, "y", 0.);
                 match kind {

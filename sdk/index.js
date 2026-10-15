@@ -98,21 +98,25 @@ export const group = (children, props = {}) => ({
   children,
   ...props,
 });
-export const rect = (x, y, width, height, color, props = {}) => ({
+// Rects and circles take a flat colour string or a gradient fill descriptor
+// ({ type: "linear" | "radial", stops, ... }); gradients need the "gradients" capability.
+const paint = (fill) =>
+  fill !== null && typeof fill === "object" ? { fill } : { color: fill };
+export const rect = (x, y, width, height, fill, props = {}) => ({
   type: "rect",
   x,
   y,
   width,
   height,
-  color,
+  ...paint(fill),
   ...props,
 });
-export const circle = (x, y, radius, color, props = {}) => ({
+export const circle = (x, y, radius, fill, props = {}) => ({
   type: "circle",
   x,
   y,
   radius,
-  color,
+  ...paint(fill),
   ...props,
 });
 // A direct text leaf. Accepts font, size, color, weight, style, lineHeight,
