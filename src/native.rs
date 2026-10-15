@@ -269,10 +269,30 @@ fn max_scale(ts: Transform) -> f32 {
     let b = (ts.ky * ts.ky + ts.sy * ts.sy).sqrt();
     a.max(b)
 }
+/// Per-leaf compositing modes. A closed set: each variant has one fixed-function
+/// pipeline, built once. `screen` and `multiply` are not here: a fixed blend state
+/// computes `src*Fs + dst*Fd` per channel and cannot form the product terms they need.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Blend {
+    Normal,
+    Lighter,
+}
+impl Blend {
+    fn parse(n: &Value) -> Result<Self> {
+        match n.get("blend") {
+            None | Some(Value::Null) => Ok(Blend::Normal),
+            Some(Value::String(s)) if s == "normal" => Ok(Blend::Normal),
+            Some(Value::String(s)) if s == "lighter" => Ok(Blend::Lighter),
+            Some(other) => bail!("Unsupported blend mode {other}; native supports normal and lighter"),
+        }
+    }
+}
 struct Gpu {
     device: wgpu::Device,
     queue: wgpu::Queue,
     pipeline: wgpu::RenderPipeline,
+    /// Additive pipeline for `blend: "lighter"`; same shader and layout as `pipeline`.
+    lighter_pipeline: wgpu::RenderPipeline,
     /// Texture-only layout for film-shader effects.
     layout: wgpu::BindGroupLayout,
     /// Upload texture plus per-leaf opacity for the composite blit.
@@ -374,30 +394,48 @@ impl Gpu {
                 bind_group_layouts: &[&blit_layout],
                 push_constant_ranges: &[],
             });
-            let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: None,
-                layout: Some(&pipeline_layout),
-                vertex: wgpu::VertexState {
-                    module: &shader,
-                    entry_point: "vs",
-                    compilation_options: Default::default(),
-                    buffers: &[],
+            let blit_pipeline = |blend: wgpu::BlendState| {
+                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: None,
+                    layout: Some(&pipeline_layout),
+                    vertex: wgpu::VertexState {
+                        module: &shader,
+                        entry_point: "vs",
+                        compilation_options: Default::default(),
+                        buffers: &[],
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &shader,
+                        entry_point: "fs",
+                        compilation_options: Default::default(),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format: wgpu::TextureFormat::Rgba16Float,
+                            blend: Some(blend),
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                    }),
+                    primitive: Default::default(),
+                    depth_stencil: None,
+                    multisample: Default::default(),
+                    multiview: None,
+                    cache: None,
+                })
+            };
+            let pipeline = blit_pipeline(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING);
+            // Additive in linear light: rgb' = rgb + src (src is premultiplied and already
+            // scaled by opacity in the blit shader, so transparent texels add nothing).
+            // Destination alpha is kept, so the frame alpha never exceeds its clear value.
+            let lighter_pipeline = blit_pipeline(wgpu::BlendState {
+                color: wgpu::BlendComponent {
+                    src_factor: wgpu::BlendFactor::One,
+                    dst_factor: wgpu::BlendFactor::One,
+                    operation: wgpu::BlendOperation::Add,
                 },
-                fragment: Some(wgpu::FragmentState {
-                    module: &shader,
-                    entry_point: "fs",
-                    compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: wgpu::TextureFormat::Rgba16Float,
-                        blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
-                primitive: Default::default(),
-                depth_stencil: None,
-                multisample: Default::default(),
-                multiview: None,
-                cache: None,
+                alpha: wgpu::BlendComponent {
+                    src_factor: wgpu::BlendFactor::Zero,
+                    dst_factor: wgpu::BlendFactor::One,
+                    operation: wgpu::BlendOperation::Add,
+                },
             });
             let post_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: None,
@@ -493,11 +531,12 @@ impl Gpu {
                 },
             );
             let hardware = !matches!(adapter_info.device_type, wgpu::DeviceType::Cpu);
-            let info = json!({"available":true,"apiVersion":"0.1.0","features":["groups","transforms","clipping","paths","text","text-letter-spacing","images","cameras","transitions","video","shader-wgsl","supersampling","motion-blur","svg","gradients","frame-grain"],"adapter":adapter_info.name,"driver":adapter_info.driver_info,"hardware":hardware,"maxDimensions":limits.max_texture_dimension_2d,"textureFormats":["rgba16float"],"workingBitDepth":16,"rasterization":"Rust tiny-skia/Cosmic Text; linear-light wgpu composition"});
+            let info = json!({"available":true,"apiVersion":"0.1.0","features":["groups","transforms","clipping","paths","text","text-letter-spacing","images","cameras","transitions","video","shader-wgsl","supersampling","motion-blur","svg","gradients","frame-grain","blend-lighter"],"adapter":adapter_info.name,"driver":adapter_info.driver_info,"hardware":hardware,"maxDimensions":limits.max_texture_dimension_2d,"textureFormats":["rgba16float"],"workingBitDepth":16,"rasterization":"Rust tiny-skia/Cosmic Text; linear-light wgpu composition"});
             Ok(Self {
                 device,
                 queue,
                 pipeline,
+                lighter_pipeline,
                 layout,
                 blit_layout,
                 opacity,
@@ -546,6 +585,7 @@ impl Gpu {
         (width, height): (u32, u32),
         region: Region,
         opacity: f32,
+        blend: Blend,
     ) -> Result<()> {
         let (left, top, right, bottom) = region;
         if right <= left || bottom <= top {
@@ -560,7 +600,7 @@ impl Gpu {
             self.staging
                 .extend_from_slice(&data[row..row + (rw * 4) as usize]);
         }
-        self.blit(target, (width, height), region, opacity)
+        self.blit(target, (width, height), region, opacity, blend)
     }
     /// Upload staging and draw the fullscreen blit for `region`.
     fn blit(
@@ -569,6 +609,7 @@ impl Gpu {
         (width, height): (u32, u32),
         region: Region,
         opacity: f32,
+        blend: Blend,
     ) -> Result<()> {
         let (left, top, right, bottom) = region;
         let rw = right - left;
@@ -644,7 +685,10 @@ impl Gpu {
                 occlusion_query_set: None,
             });
             pass.set_scissor_rect(left, top, rw, rh);
-            pass.set_pipeline(&self.pipeline);
+            pass.set_pipeline(match blend {
+                Blend::Normal => &self.pipeline,
+                Blend::Lighter => &self.lighter_pipeline,
+            });
             pass.set_bind_group(0, bind, &[]);
             pass.draw(0..3, 0..1);
         }
@@ -1033,6 +1077,11 @@ impl Renderer {
         if n.get("effect").is_some() {
             bail!("Use an explicit shader-wgsl node for native effects; portable effect capability unavailable");
         }
+        let blend = Blend::parse(n)?;
+        let leaf = ["rect", "circle", "path", "text", "image", "video", "svg"].contains(&kind);
+        if !n["blend"].is_null() && !leaf {
+            bail!("blend applies to leaf nodes only; a {kind} node cannot set it");
+        }
         if !["group", "camera"].contains(&kind) {
             if kind == "shader" {
                 self.gpu.effect(
@@ -1065,6 +1114,7 @@ impl Renderer {
                     (width, height),
                     (0, 0, width, height),
                     opacity,
+                    blend,
                 )?;
                 self.prof.add("composite", t_composite);
             } else {
@@ -1386,7 +1436,7 @@ impl Renderer {
                     }
                     let t_composite = Instant::now();
                     self.gpu
-                        .composite(target, pix.data(), (width, height), region, opacity)?;
+                        .composite(target, pix.data(), (width, height), region, opacity, blend)?;
                     self.prof.add("composite", t_composite);
                     // Leave the scratch pixmap transparent for the next leaf.
                     let (left, top, right, bottom) = region;
