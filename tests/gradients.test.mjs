@@ -11,7 +11,7 @@ import { openNative } from "../src/native.mjs";
 import { openFilm } from "../src/browser.mjs";
 import { nativeBinary } from "../src/media.mjs";
 import { run } from "../src/process.mjs";
-import { expandStops, parseGradient } from "../web/gradient.js";
+import { expandStops, expandStopsWithLimitForTest, parseGradient } from "../web/gradient.js";
 
 const ENGINE = path.resolve(import.meta.dirname, "..");
 const NATIVE = { skip: !process.env.FILM_NATIVE, timeout: 600000 };
@@ -236,10 +236,30 @@ test("shared descriptor limits reject authored and aggregate stop overflow", () 
     i % 2 ? "#ffffff" : "#000000",
   ]);
   const spec = parseGradient(linearFill(0, 0, 10, 0, alternating));
-  const atExpandedLimit = Array.from({ length: 65536 }, (_, i) => [i / 65535, [0, 0, 0, 1]]);
-  assert.equal(expandStops(atExpandedLimit, "srgb").length, 65536);
+  const authoredExpansion = Array.from({ length: 65536 }, (_, i) => [
+    i / 65535,
+    [i / 65536, 0, 0, 1],
+  ]);
+  assert.equal(expandStopsWithLimitForTest(authoredExpansion, "srgb", 65536).length, 65536);
+  assert.throws(
+    () =>
+      expandStopsWithLimitForTest([...authoredExpansion, [1, [1, 0.5, 0, 1]]], "srgb", 65536),
+    { message: "gradient expanded stops exceed maximum of 65536" },
+  );
   assert.throws(
     () => expandStops(spec.stops, spec.space),
+    { message: "gradient expanded stops exceed maximum of 65536" },
+  );
+});
+
+test("browser gradient expansion accepts 65536 distinct stops and rejects the next append", () => {
+  const stops = Array.from({ length: 65536 }, (_, i) => [
+    i / 65535,
+    [i / 65536, 0, 0, 1],
+  ]);
+  assert.equal(expandStops(stops, "srgb").length, 65536);
+  assert.throws(
+    () => expandStops([...stops, [1, [1, 0.5, 0, 1]]], "srgb"),
     { message: "gradient expanded stops exceed maximum of 65536" },
   );
 });
@@ -313,8 +333,18 @@ const INVALID = [
     "linear gradient needs two distinct endpoints",
   ],
   [
+    "axis collapsed after f32 narrowing",
+    linearFill(1, 0, 1.00000001, 0, stops2),
+    "linear gradient needs two distinct endpoints",
+  ],
+  [
     "radius of zero",
     radialFill(0, 0, 0, stops2),
+    "radial gradient radius must be greater than 0",
+  ],
+  [
+    "positive radius underflows after f32 narrowing",
+    radialFill(0, 0, 1e-50, stops2),
     "radial gradient radius must be greater than 0",
   ],
   [
@@ -350,6 +380,24 @@ test("browser gradient parsing rejects each invalid descriptor with the engine's
     assert.throws(() => parseGradient(fill), { message }, label);
 });
 
+test("browser runtime rejects geometry that collapses or underflows in f32", async () => {
+  for (const fill of [
+    linearFill(1, 0, 1.00000001, 0, BW),
+    radialFill(0, 0, 1e-50, BW),
+  ]) {
+    const { root, p } = filmDir("narrowed-invalid", 2, 2, [
+      { type: "rect", x: 0, y: 0, width: 2, height: 2, fill },
+    ]);
+    const browser = await openFilm(p, { size: [2, 2], cpu: true });
+    try {
+      await assert.rejects(browser.capture(0, 0), /gradient (needs two distinct endpoints|radius must be greater than 0)/);
+    } finally {
+      await browser.close();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
 test(
   "native renderer rejects each invalid descriptor with the same text",
   NATIVE,
@@ -366,6 +414,71 @@ test(
           (e) => e.message.includes(message),
           `${label}: expected "${message}"`,
         );
+      } finally {
+        await native.close();
+        fs.rmSync(root, { recursive: true, force: true });
+      }
+    }
+  },
+);
+
+test(
+  "native and browser descriptor stop limits accept 4096 and reject 4097",
+  NATIVE,
+  async () => {
+    binary();
+    const atLimit = Array.from({ length: 4096 }, (_, i) => [i / 4095, "#000000"]);
+    const overLimit = Array.from({ length: 4097 }, (_, i) => [i / 4096, "#000000"]);
+    const browserAuthored = parseGradient(linearFill(0, 0, 1, 0, atLimit, "srgb"));
+    assert.equal(browserAuthored.stops.length, 4096);
+    assert.throws(
+      () => parseGradient(linearFill(0, 0, 1, 0, overLimit, "srgb")),
+      /gradient authored stops exceed maximum of 4096/,
+    );
+    const good = filmDir("authored-limit", 2, 2, [
+      { type: "rect", x: 0, y: 0, width: 2, height: 2, fill: linearFill(0, 0, 1, 0, atLimit, "srgb") },
+    ]);
+    const bad = filmDir("authored-over-limit", 2, 2, [
+      { type: "rect", x: 0, y: 0, width: 2, height: 2, fill: linearFill(0, 0, 1, 0, overLimit, "srgb") },
+    ]);
+    const browserGood = await openFilm(good.p, { size: [2, 2], cpu: true });
+    const nativeGood = await openNative(good.p, { size: [2, 2] });
+    try {
+      assert.ok((await browserGood.capture(0, 0)).png.length > 0, "browser accepts 4096");
+      assert.ok((await nativeGood.capture(0)).png.length > 0, "native accepts 4096");
+    } finally {
+      await browserGood.close();
+      await nativeGood.close();
+      fs.rmSync(good.root, { recursive: true, force: true });
+    }
+    const browserBad = await openFilm(bad.p, { size: [2, 2], cpu: true });
+    const nativeBad = await openNative(bad.p, { size: [2, 2] });
+    try {
+      await assert.rejects(browserBad.capture(0, 0), /gradient authored stops exceed maximum of 4096/);
+      await assert.rejects(nativeBad.capture(0), /gradient authored stops exceed maximum of 4096/);
+    } finally {
+      await browserBad.close();
+      await nativeBad.close();
+      fs.rmSync(bad.root, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "native runtime rejects f32-collapsed geometry and matches browser",
+  NATIVE,
+  async () => {
+    binary();
+    for (const [fill, message] of [
+      [linearFill(1, 0, 1.00000001, 0, BW), "linear gradient needs two distinct endpoints"],
+      [radialFill(0, 0, 1e-50, BW), "radial gradient radius must be greater than 0"],
+    ]) {
+      const { root, p } = filmDir("native-narrowed-invalid", 2, 2, [
+        { type: "rect", x: 0, y: 0, width: 2, height: 2, fill },
+      ]);
+      const native = await openNative(p, { size: [2, 2] });
+      try {
+        await assert.rejects(native.capture(0), new RegExp(message));
       } finally {
         await native.close();
         fs.rmSync(root, { recursive: true, force: true });

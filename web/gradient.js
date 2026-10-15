@@ -53,14 +53,14 @@ export function parseGradient(fill) {
   let shape;
   if (fill.type === "linear") {
     const [x1, y1, x2, y2] = ["x1", "y1", "x2", "y2"].map((k) =>
-      number(fill, k, "linear gradient"),
+      Math.fround(number(fill, k, "linear gradient")),
     );
     if (x1 === x2 && y1 === y2)
       throw Error("linear gradient needs two distinct endpoints");
     shape = { type: "linear", x1, y1, x2, y2 };
   } else if (fill.type === "radial") {
     const [cx, cy, r] = ["cx", "cy", "r"].map((k) =>
-      number(fill, k, "radial gradient"),
+      Math.fround(number(fill, k, "radial gradient")),
     );
     if (r <= 0) throw Error("radial gradient radius must be greater than 0");
     shape = { type: "radial", cx, cy, r };
@@ -111,14 +111,14 @@ function chordError(mid, c0, c1) {
   return worst * 255;
 }
 
-export function expandStops(stops, space) {
+function expandStopsWithLimit(stops, space, maxStops) {
   const out = [];
   const same = (a, b) =>
     a && a[0] === b[0] && a[1].every((v, i) => v === b[1][i]);
   const push = (stop) => {
     if (!same(out[out.length - 1], stop)) {
-      if (out.length >= MAX_EXPANDED_STOPS)
-        throw Error(`gradient expanded stops exceed maximum of ${MAX_EXPANDED_STOPS}`);
+      if (out.length >= maxStops)
+        throw Error(`gradient expanded stops exceed maximum of ${maxStops}`);
       out.push(stop);
     }
   };
@@ -132,8 +132,8 @@ export function expandStops(stops, space) {
       const cm = seg.at(um);
       if (depth >= MAX_DEPTH || chordError(cm, c0, c1) <= TOLERANCE) return;
       split(u0, um, c0, cm, depth + 1);
-      if (out.length >= MAX_EXPANDED_STOPS)
-        throw Error(`gradient expanded stops exceed maximum of ${MAX_EXPANDED_STOPS}`);
+      if (out.length >= maxStops)
+        throw Error(`gradient expanded stops exceed maximum of ${maxStops}`);
       out.push([o0 + (o1 - o0) * um, cm]);
       split(um, u1, cm, c1, depth + 1);
     };
@@ -142,6 +142,14 @@ export function expandStops(stops, space) {
     push([o1, seg.c1]);
   }
   return out;
+}
+
+export function expandStopsWithLimitForTest(stops, space, maxStops) {
+  return expandStopsWithLimit(stops, space, maxStops);
+}
+
+export function expandStops(stops, space) {
+  return expandStopsWithLimit(stops, space, MAX_EXPANDED_STOPS);
 }
 
 // A canvas fill style for a gradient descriptor, validated like the native engine.

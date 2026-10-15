@@ -202,18 +202,19 @@ impl Segment {
         (c0, c1): (Rgba, Rgba),
         depth: u32,
         out: &mut Vec<(f32, Rgba)>,
+        max_stops: usize,
     ) -> Result<()> {
         let um = (u0 + u1) / 2.;
         let cm = self.at(um);
         if depth >= MAX_DEPTH || chord_error(cm, c0, c1) <= TOLERANCE {
             return Ok(());
         }
-        self.subdivide((o0, o1), (u0, um), (c0, cm), depth + 1, out)?;
-        if out.len() >= MAX_EXPANDED_STOPS {
-            bail!("gradient expanded stops exceed maximum of {MAX_EXPANDED_STOPS}");
+        self.subdivide((o0, o1), (u0, um), (c0, cm), depth + 1, out, max_stops)?;
+        if out.len() >= max_stops {
+            bail!("gradient expanded stops exceed maximum of {max_stops}");
         }
         out.push((o0 + (o1 - o0) * um, cm));
-        self.subdivide((o0, o1), (um, u1), (cm, c1), depth + 1, out)?;
+        self.subdivide((o0, o1), (um, u1), (cm, c1), depth + 1, out, max_stops)?;
         Ok(())
     }
 }
@@ -230,29 +231,45 @@ fn chord_error(mid: Rgba, c0: Rgba, c1: Rgba) -> f32 {
     worst * 255.
 }
 
+fn push_stop(out: &mut Vec<(f32, Rgba)>, stop: (f32, Rgba), max_stops: usize) -> Result<()> {
+    if out.last() != Some(&stop) {
+        if out.len() >= max_stops {
+            bail!("gradient expanded stops exceed maximum of {max_stops}");
+        }
+        out.push(stop);
+    }
+    Ok(())
+}
+
 /// The stops tiny-skia should interpolate straight in sRGB so the result follows
 /// `space` with premultiplied alpha. Opaque sRGB stops come back unchanged.
-pub(super) fn expand(stops: &[(f32, Rgba)], space: Space) -> Result<Vec<(f32, Rgba)>> {
+pub(super) fn expand_with_limit(
+    stops: &[(f32, Rgba)],
+    space: Space,
+    max_stops: usize,
+) -> Result<Vec<(f32, Rgba)>> {
     let mut out: Vec<(f32, Rgba)> = Vec::new();
-    let push = |out: &mut Vec<(f32, Rgba)>, stop: (f32, Rgba)| {
-        if out.last() != Some(&stop) {
-            if out.len() >= MAX_EXPANDED_STOPS {
-                bail!("gradient expanded stops exceed maximum of {MAX_EXPANDED_STOPS}");
-            }
-            out.push(stop);
-        }
-        Ok(())
-    };
     for pair in stops.windows(2) {
         let ((o0, c0), (o1, c1)) = (pair[0], pair[1]);
         let segment = Segment::new(c0, c1, space);
-        push(&mut out, (o0, segment.c0))?;
+        push_stop(&mut out, (o0, segment.c0), max_stops)?;
         if o1 > o0 && segment.c0 != segment.c1 {
-            segment.subdivide((o0, o1), (0., 1.), (segment.c0, segment.c1), 0, &mut out)?;
+            segment.subdivide(
+                (o0, o1),
+                (0., 1.),
+                (segment.c0, segment.c1),
+                0,
+                &mut out,
+                max_stops,
+            )?;
         }
-        push(&mut out, (o1, segment.c1))?;
+        push_stop(&mut out, (o1, segment.c1), max_stops)?;
     }
     Ok(out)
+}
+
+pub(super) fn expand(stops: &[(f32, Rgba)], space: Space) -> Result<Vec<(f32, Rgba)>> {
+    expand_with_limit(stops, space, MAX_EXPANDED_STOPS)
 }
 
 impl Spec {
@@ -335,7 +352,10 @@ mod tests {
     #[test]
     fn opaque_srgb_stops_pass_through() {
         let spec = parse(&bw("srgb")).unwrap();
-        assert_eq!(expand(&spec.stops, spec.space).unwrap(), spec.stops);
+        assert_eq!(
+            expand(&spec.stops, spec.space).unwrap(),
+            spec.stops
+        );
     }
 
     #[test]
@@ -434,6 +454,70 @@ mod tests {
     }
 
     #[test]
+    fn expansion_accepts_exact_global_budget_and_rejects_one_more() {
+        let stops = |count: usize| {
+            (0..count)
+                .map(|i| {
+                    (
+                        i as f32 / (count - 1) as f32,
+                        [i as f32 / count as f32, 0., 0., 1.],
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            expand_with_limit(&stops(MAX_EXPANDED_STOPS), Space::Srgb, MAX_EXPANDED_STOPS)
+                .unwrap()
+                .len(),
+            MAX_EXPANDED_STOPS
+        );
+        let error = expand_with_limit(
+            &stops(MAX_EXPANDED_STOPS + 1),
+            Space::Srgb,
+            MAX_EXPANDED_STOPS,
+        )
+        .unwrap_err();
+        assert_eq!(
+            format!("{error:#}"),
+            "gradient expanded stops exceed maximum of 65536"
+        );
+        let mut out = (0..MAX_EXPANDED_STOPS)
+            .map(|i| (i as f32, [0., 0., 0., 1.]))
+            .collect::<Vec<_>>();
+        assert!(push_stop(
+            &mut out,
+            (MAX_EXPANDED_STOPS as f32, [1., 0., 0., 1.]),
+            MAX_EXPANDED_STOPS
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn expanded_stop_budget_boundary_is_shared_with_runtime() {
+        let stops = |count: usize| {
+            (0..count)
+                .map(|i| {
+                    (
+                        i as f32 / (count - 1) as f32,
+                        [i as f32 / count as f32, 0., 0., 1.],
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let at = expand_with_limit(&stops(MAX_EXPANDED_STOPS), Space::Srgb, MAX_EXPANDED_STOPS).unwrap();
+        assert_eq!(at.len(), MAX_EXPANDED_STOPS);
+        let over = expand_with_limit(
+            &stops(MAX_EXPANDED_STOPS + 1),
+            Space::Srgb,
+            MAX_EXPANDED_STOPS,
+        );
+        assert_eq!(
+            format!("{:#}", over.unwrap_err()),
+            "gradient expanded stops exceed maximum of 65536"
+        );
+    }
+
+    #[test]
     fn invalid_descriptors_report_what_is_wrong() {
         let stops = json!([{"offset":0,"color":"#000000"},{"offset":1,"color":"#ffffff"}]);
         let linear = |extra: Value| {
@@ -466,6 +550,16 @@ mod tests {
             err(linear(json!({"stops":too_many}))),
             "gradient authored stops exceed maximum of 4096"
         );
+        let at_limit = (0..MAX_AUTHORED_STOPS)
+            .map(|i| json!({"offset": i as f64 / (MAX_AUTHORED_STOPS - 1) as f64, "color":"#000000"}))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            parse(&linear(json!({"stops":at_limit})))
+                .unwrap()
+                .stops
+                .len(),
+            MAX_AUTHORED_STOPS
+        );
         assert_eq!(
             err(linear(
                 json!({"stops":[{"offset":0,"color":"#000000"},{"offset":1.5,"color":"#ffffff"}]})
@@ -485,7 +579,15 @@ mod tests {
             "linear gradient needs two distinct endpoints"
         );
         assert_eq!(
+            err(linear(json!({"x1":1,"x2":1.00000001}))),
+            "linear gradient needs two distinct endpoints"
+        );
+        assert_eq!(
             err(json!({"type":"radial","cx":0,"cy":0,"r":0,"stops":stops})),
+            "radial gradient radius must be greater than 0"
+        );
+        assert_eq!(
+            err(json!({"type":"radial","cx":0,"cy":0,"r":1e-50,"stops":stops})),
             "radial gradient radius must be greater than 0"
         );
         assert_eq!(
