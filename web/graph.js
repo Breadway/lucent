@@ -101,6 +101,8 @@ export class GraphRenderer {
     ]);
     const visit = (n, parents) => {
       if (n.effect) throw Error(`Unsupported portable effect: ${n.effect}`);
+      if (n.blend != null && !leafTypes.has(n.type))
+        throw Error(`blend applies to leaf nodes only; a ${n.type} node cannot set it`);
       if (leafTypes.has(n.type)) {
         lc.resetTransform();
         lc.clearRect(0, 0, this.layer.width, this.layer.height);
@@ -124,7 +126,7 @@ export class GraphRenderer {
         for (const parent of [...parents].reverse())
           tree = { ...parent, children: [tree] };
         this.node(lc, tree);
-        this.compositor.add(this.layer);
+        this.compositor.add(this.layer, n.blend ?? "normal");
       }
       for (const child of n.children || [])
         visit(child, [...parents, { ...n, type: "group" }]);
