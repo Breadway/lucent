@@ -11,6 +11,9 @@ transform, and blends the result like any other leaf. Declare `requires: ["svg"]
   the primary font. Scripts that can hit this should split runs themselves (the Astra shim does).
 - `grain: {seed, opacity = 0.055, width = 320, height = 180}` overlays deterministic noise,
   scaled up without smoothing, with the `overlay` blend (the Astra page's film grain).
+  The leaf routine shares the frame-level seed rule: an optional `frame` index is added
+  to `seed` with 32-bit wrapping, so per-frame leaf grain stays reproducible across
+  reruns and out-of-order seeks.
 - Clip masks from enclosing groups are not applied to the document. Group opacity is.
 - A filter's default region is the content bounding box +10%, which resvg clamps to five frames.
   Give large blurs `filterUnits="userSpaceOnUse"` and a frame-sized region.

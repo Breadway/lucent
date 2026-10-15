@@ -106,7 +106,7 @@ export async function openFilm(p, options = {}) {
             },
             canvas,
             seek: async (t, frame, mb = 1, shutter = 0.5, fps = 30) => {
-              if (mb === 1) return renderer.draw(await renderer.prepare(t));
+              if (mb === 1) return renderer.draw(await renderer.prepare(t, fps));
               const c = canvas.getContext("2d"),
                 sum = new Float32Array(canvas.width * canvas.height * 3);
               const linear = (v) =>
@@ -121,7 +121,7 @@ export async function openFilm(p, options = {}) {
                     t + ((i / (mb - 1) - 0.5) * shutter) / fps,
                   ),
                 );
-                renderer.draw(await renderer.prepare(sample));
+                renderer.draw(await renderer.prepare(sample, fps));
                 const pixels = c.getImageData(
                   0,
                   0,

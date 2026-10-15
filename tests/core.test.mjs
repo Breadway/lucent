@@ -39,6 +39,16 @@ test("rational timeline timestamps and deterministic out-of-order seeks", () => 
   );
   assert.equal(sourceTime(5, { trim: 2, rate: 2, duration: 3, loop: true }), 3);
 });
+test("frame grain uses output frame index and validates bounded parameters", () => {
+  const film = defineFilm({ grain: { seed: 7, width: 4, height: 2 }, scenes: [{ id: "g", duration: 2, frame: () => ({ type: "rect" }) }] });
+  const a = frameGraph(film, 1 / 30, 30), b = frameGraph(film, 0.5, 30);
+  assert.equal(a.grain.frame, 1);
+  assert.equal(b.grain.frame, 15);
+  assert.deepEqual(frameGraph(film, 1 / 30, 30), a);
+  assert.ok(film.scenes[0].requires.includes("frame-grain"));
+  assert.throws(() => defineFilm({ grain: { seed: 1, width: 5000 }, scenes: [{ id: "g", duration: 1, frame() {} }] }), /grain/);
+  assert.throws(() => defineFilm({ grain: { seed: 1, opacity: 0 / 0 }, scenes: [{ id: "g", duration: 1, frame() {} }] }), /grain/);
+});
 test("cache version/settings and explicit backend diagnostics", () => {
   assert.notEqual(
     cacheKey({}, { backend: "browser", width: 1920 }, "dep"),

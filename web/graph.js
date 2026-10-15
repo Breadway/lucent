@@ -10,8 +10,9 @@ export class GraphRenderer {
     this.clips = new Map();
     this.checkedText = new Set();
   }
-  async prepare(t) {
-    const graph = frameGraph(this.film, t);
+  async prepare(t, fps = 30) {
+    const graph = frameGraph(this.film, t, fps);
+    if (this.film.grain?.opacity === 0) delete graph.grain;
     await this.prepareNode(graph, t);
     return graph;
   }
@@ -69,6 +70,7 @@ export class GraphRenderer {
     }
   }
   draw(graph) {
+    if (graph.grain?.opacity === 0) delete graph.grain;
     const c = this.canvas.getContext("2d", { colorSpace: "srgb" });
     if (
       !this.compositor ||
@@ -128,6 +130,7 @@ export class GraphRenderer {
         visit(child, [...parents, { ...n, type: "group" }]);
     };
     visit(graph, []);
+    if (graph.grain) this.compositor.grain(graph.grain);
     c.resetTransform();
     c.clearRect(0, 0, this.canvas.width, this.canvas.height);
     this.compositor.finish(c);

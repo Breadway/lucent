@@ -493,7 +493,7 @@ impl Gpu {
                 },
             );
             let hardware = !matches!(adapter_info.device_type, wgpu::DeviceType::Cpu);
-            let info = json!({"available":true,"apiVersion":"0.1.0","features":["groups","transforms","clipping","paths","text","text-letter-spacing","images","cameras","transitions","video","shader-wgsl","supersampling","motion-blur","svg","gradients"],"adapter":adapter_info.name,"driver":adapter_info.driver_info,"hardware":hardware,"maxDimensions":limits.max_texture_dimension_2d,"textureFormats":["rgba16float"],"workingBitDepth":16,"rasterization":"Rust tiny-skia/Cosmic Text; linear-light wgpu composition"});
+            let info = json!({"available":true,"apiVersion":"0.1.0","features":["groups","transforms","clipping","paths","text","text-letter-spacing","images","cameras","transitions","video","shader-wgsl","supersampling","motion-blur","svg","gradients","frame-grain"],"adapter":adapter_info.name,"driver":adapter_info.driver_info,"hardware":hardware,"maxDimensions":limits.max_texture_dimension_2d,"textureFormats":["rgba16float"],"workingBitDepth":16,"rasterization":"Rust tiny-skia/Cosmic Text; linear-light wgpu composition"});
             Ok(Self {
                 device,
                 queue,
@@ -1487,7 +1487,11 @@ impl Renderer {
         let t_read = Instant::now();
         let bytes = self.gpu.read(&target, 8)?;
         self.prof.add("readback", t_read);
-        Ok(bytes)
+        if let Some(grain) = graph.get("grain") {
+            apply_frame_grain(bytes, grain, width, height)
+        } else {
+            Ok(bytes)
+        }
     }
     pub(crate) fn render(
         &mut self,
@@ -1583,6 +1587,65 @@ impl Renderer {
         self.prof.flush();
     }
 }
+/// Frame-level film grain, shared with the `svg` leaf routine: a small noise
+/// canvas indexed by the output frame, scaled up without smoothing and blended
+/// with `overlay` in linear light. Operates on the RGBA16F linear-light frame;
+/// alpha is untouched. Opacity 0 returns the input bytes unchanged.
+fn apply_frame_grain(
+    mut bytes: Vec<u8>,
+    grain: &Value,
+    width: u32,
+    height: u32,
+) -> Result<Vec<u8>> {
+    let opacity = grain["opacity"].as_f64().unwrap_or(0.055);
+    let gw = grain["width"].as_u64().unwrap_or(320) as usize;
+    let gh = grain["height"].as_u64().unwrap_or(180) as usize;
+    let seed = grain["seed"]
+        .as_i64()
+        .context("grain seed must be an integer")?;
+    let frame = grain["frame"]
+        .as_i64()
+        .context("grain frame must be an integer")?;
+    if !opacity.is_finite()
+        || !(0.0..=1.0).contains(&opacity)
+        || gw == 0
+        || gh == 0
+        || gw > 4096
+        || gh > 4096
+        || gw.saturating_mul(gh) > 1_048_576
+        || !(i32::MIN as i64..=i32::MAX as i64).contains(&seed)
+        || !(0..=i32::MAX as i64).contains(&frame)
+    {
+        bail!("Invalid frame grain parameters");
+    }
+    if opacity == 0.0 {
+        return Ok(bytes);
+    }
+    let seed = seed as i32;
+    let frame = frame as i32;
+    for (i, px) in bytes.chunks_exact_mut(8).enumerate() {
+        let x = i % width as usize;
+        let y = i / width as usize;
+        let ni = (y * gh / height as usize) * gw + x * gw / width as usize;
+        let n = (ni as i32)
+            .wrapping_add(seed.wrapping_add(frame))
+            .wrapping_mul(0x9E37_79B1_u32 as i32) as u32;
+        let noise = (n >> 24) as f32 / 255.0;
+        for c in 0..3 {
+            let d = f16::from_le_bytes([px[c * 2], px[c * 2 + 1]]).to_f32();
+            let overlay = if d <= 0.5 {
+                2.0 * d * noise
+            } else {
+                1.0 - 2.0 * (1.0 - d) * (1.0 - noise)
+            };
+            px[c * 2..c * 2 + 2].copy_from_slice(
+                &f16::from_f32(d + (overlay - d) * opacity as f32).to_le_bytes(),
+            );
+        }
+    }
+    Ok(bytes)
+}
+
 fn encode_frame(values: &[f32], width: u32, height: u32) -> Result<Vec<u8>> {
     let mut out = Vec::with_capacity(values.len() / 3 * 4);
     for values in values.chunks_exact(3) {
@@ -1697,7 +1760,7 @@ pub fn server(bundle: &str, manifest: &str) -> Result<()> {
                 })
             .clamp(0., (total - 1e-6).max(0.));
             *deadline.lock().unwrap() = Instant::now() + Duration::from_secs(5);
-            let script = format!("JSON.stringify(__graph({t}))");
+            let script = format!("JSON.stringify(__graph({t}, {fps}))");
             let t_js = Instant::now();
             let json = context.with(|ctx| ctx.eval::<String, _>(script))?;
             renderer.prof.add("js-frame", t_js);

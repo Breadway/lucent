@@ -161,7 +161,7 @@ iframe.onload = async () => {
         total: mod.default.duration,
         scenes: mod.default.scenes.map((s) => ({ ...s, dur: s.duration })),
       };
-      w.__viewerSeek = async (t) => r.draw(await r.prepare(t));
+      w.__viewerSeek = async (t) => r.draw(await r.prepare(t, Number($("fps").value) || 30));
     } else if (p.adapter === "astra") {
       timeline = w.TL;
       w.__viewerSeek = (t) =>
