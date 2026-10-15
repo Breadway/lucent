@@ -493,7 +493,7 @@ impl Gpu {
                 },
             );
             let hardware = !matches!(adapter_info.device_type, wgpu::DeviceType::Cpu);
-"svg","gradients","frame-grain"],"adapter":adapter_info.name,"driver":adapter_info.driver_info,"hardware":hardware,"maxDimensions":limits.max_texture_dimension_2d,"textureFormats":["rgba16float"],"workingBitDepth":16,"rasterization":"Rust tiny-skia/Cosmic Text; linear-light wgpu composition"});
+            let info = json!({"available":true,"apiVersion":"0.1.0","features":["groups","transforms","clipping","paths","text","text-letter-spacing","images","cameras","transitions","video","shader-wgsl","supersampling","motion-blur","svg","gradients","frame-grain"],"adapter":adapter_info.name,"driver":adapter_info.driver_info,"hardware":hardware,"maxDimensions":limits.max_texture_dimension_2d,"textureFormats":["rgba16float"],"workingBitDepth":16,"rasterization":"Rust tiny-skia/Cosmic Text; linear-light wgpu composition"});
             Ok(Self {
                 device,
                 queue,
