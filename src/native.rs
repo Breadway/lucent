@@ -270,8 +270,10 @@ fn max_scale(ts: Transform) -> f32 {
     a.max(b)
 }
 /// Per-leaf compositing modes. A closed set: each variant has one fixed-function
-/// pipeline, built once. `screen` and `multiply` are not here: a fixed blend state
-/// computes `src*Fs + dst*Fd` per channel and cannot form the product terms they need.
+/// pipeline, built once. `screen` and `multiply` are deferred, not impossible: screen is
+/// exact with fixed factors (colour One/OneMinusSrc, alpha One/OneMinusSrcAlpha), and
+/// multiply is exact with colour Dst/OneMinusSrcAlpha when the destination is opaque.
+/// They are outside this change's scope (see docs/native-blend.md).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Blend {
     Normal,
@@ -283,7 +285,7 @@ impl Blend {
             None | Some(Value::Null) => Ok(Blend::Normal),
             Some(Value::String(s)) if s == "normal" => Ok(Blend::Normal),
             Some(Value::String(s)) if s == "lighter" => Ok(Blend::Lighter),
-            Some(other) => bail!("Unsupported blend mode {other}; native supports normal and lighter"),
+            Some(other) => bail!("Unsupported blend mode {other}; supported modes are normal and lighter"),
         }
     }
 }
@@ -1078,9 +1080,9 @@ impl Renderer {
             bail!("Use an explicit shader-wgsl node for native effects; portable effect capability unavailable");
         }
         let blend = Blend::parse(n)?;
-        let leaf = ["rect", "circle", "path", "text", "image", "video", "svg"].contains(&kind);
+        let leaf = ["rect", "circle", "path", "text", "image", "video"].contains(&kind);
         if !n["blend"].is_null() && !leaf {
-            bail!("blend applies to leaf nodes only; a {kind} node cannot set it");
+            bail!("blend applies to rect, circle, path, text, image and video leaves only; a {kind} node cannot set it");
         }
         if !["group", "camera"].contains(&kind) {
             if kind == "shader" {

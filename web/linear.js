@@ -99,7 +99,7 @@ export class LinearCompositor {
   }
   add(canvas, blend = "normal") {
     if (blend !== "normal" && blend !== "lighter")
-      throw Error(`Unsupported blend mode ${blend}; browser supports normal and lighter`);
+      throw Error(`Unsupported blend mode ${JSON.stringify(blend)}; supported modes are normal and lighter`);
     if (this.cpu) {
       const bytes = canvas
         .getContext("2d")

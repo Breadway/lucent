@@ -90,6 +90,7 @@ export class GraphRenderer {
     bg.fillRect(0, 0, 1, 1);
     this.compositor.begin([...bg.getImageData(0, 0, 1, 1).data].slice(0, 3));
     const lc = this.layer.getContext("2d", { colorSpace: "srgb" });
+    const blendLeafTypes = new Set(["rect", "circle", "path", "text", "image", "video"]);
     const leafTypes = new Set([
       "rect",
       "circle",
@@ -101,8 +102,8 @@ export class GraphRenderer {
     ]);
     const visit = (n, parents) => {
       if (n.effect) throw Error(`Unsupported portable effect: ${n.effect}`);
-      if (n.blend != null && !leafTypes.has(n.type))
-        throw Error(`blend applies to leaf nodes only; a ${n.type} node cannot set it`);
+      if (n.blend != null && !blendLeafTypes.has(n.type))
+        throw Error(`blend applies to rect, circle, path, text, image and video leaves only; a ${n.type} node cannot set it`);
       if (leafTypes.has(n.type)) {
         lc.resetTransform();
         lc.clearRect(0, 0, this.layer.width, this.layer.height);
