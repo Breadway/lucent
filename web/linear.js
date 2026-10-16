@@ -97,7 +97,9 @@ export class LinearCompositor {
     gl.clearColor(...rgb.map((v) => linear(v / 255)), 1);
     gl.clear(gl.COLOR_BUFFER_BIT);
   }
-  add(canvas) {
+  add(canvas, blend = "normal") {
+    if (blend !== "normal" && blend !== "lighter")
+      throw Error(`Unsupported blend mode ${JSON.stringify(blend)}; supported modes are normal and lighter`);
     if (this.cpu) {
       const bytes = canvas
         .getContext("2d")
@@ -107,8 +109,9 @@ export class LinearCompositor {
         if (!a) continue;
         for (let c = 0; c < 3; c++) {
           const i = p * 3 + c;
+          const src = linear(bytes[p * 4 + c] / 255) * a;
           this.values[i] =
-            linear(bytes[p * 4 + c] / 255) * a + this.values[i] * (1 - a);
+            blend === "lighter" ? this.values[i] + src : src + this.values[i] * (1 - a);
         }
       }
       return;
@@ -121,7 +124,9 @@ export class LinearCompositor {
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, canvas);
     gl.useProgram(this.upload);
     gl.enable(gl.BLEND);
-    gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+    // Additive keeps destination alpha (blendFuncSeparate), matching the native pipeline.
+    if (blend === "lighter") gl.blendFuncSeparate(gl.ONE, gl.ONE, gl.ZERO, gl.ONE);
+    else gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
   }
   grain({ seed = 0, frame = 0, opacity = 0.055, width = 320, height = 180 } = {}) {

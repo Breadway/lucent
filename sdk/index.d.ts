@@ -115,8 +115,14 @@ export interface RadialGradientFill {
 export type Fill = string | LinearGradientFill | RadialGradientFill;
 export interface ShapeProps {
   fill?: Fill;
+  /**
+   * Per-leaf compositing: "normal" (default, premultiplied over) or "lighter"
+   * (additive in linear light, needs the "blend-lighter" capability). Leaves only.
+   */
+  blend?: BlendMode;
   [key: string]: unknown;
 }
+export type BlendMode = "normal" | "lighter";
 export function text(
   value: string,
   x: number,
