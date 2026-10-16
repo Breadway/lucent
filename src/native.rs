@@ -269,6 +269,200 @@ fn max_scale(ts: Transform) -> f32 {
     let b = (ts.ky * ts.ky + ts.sy * ts.sy).sqrt();
     a.max(b)
 }
+/// Limits on `blur`. They reject hostile input before allocation and are not a speed budget:
+/// sigma is in design px, the kernel radius in device px, and work in channel taps.
+const MAX_BLUR_SIGMA: f32 = 128.;
+const MAX_BLUR_RADIUS: i64 = 512;
+const MAX_BLUR_WORK: u64 = 8_000_000_000;
+/// Gaussian standard deviation in design px. Absent, null or zero means no blur.
+fn blur_sigma(n: &Value) -> Result<Option<f32>> {
+    match &n["blur"] {
+        Value::Null => Ok(None),
+        value => {
+            let sigma = value.as_f64().context("blur must be a number of design px")?;
+            if !sigma.is_finite() || !(0. ..=MAX_BLUR_SIGMA as f64).contains(&sigma) {
+                bail!("blur must be between 0 and {MAX_BLUR_SIGMA} design px, got {sigma}");
+            }
+            Ok((sigma > 0.).then_some(sigma as f32))
+        }
+    }
+}
+/// Path of a `rect`, `circle` or `path` leaf in its own coordinates.
+fn leaf_geometry(n: &Value, kind: &str) -> Result<tiny_skia::Path> {
+    let x = v(n, "x", 0.);
+    let y = v(n, "y", 0.);
+    match kind {
+        "rect" => {
+            let r = Rect::from_xywh(x, y, v(n, "width", 0.), v(n, "height", 0.))
+                .context("Invalid rectangle")?;
+            Ok(PathBuilder::from_rect(r))
+        }
+        "circle" => PathBuilder::from_circle(x, y, v(n, "radius", 0.)).context("Invalid circle"),
+        _ => path_commands(n),
+    }
+}
+/// Path built from a `path` leaf's command list.
+fn path_commands(n: &Value) -> Result<tiny_skia::Path> {
+    let mut p = PathBuilder::new();
+    for command in n["commands"].as_array().context("path commands")? {
+        let num = |i| command[i].as_f64().unwrap_or(0.) as f32;
+        match command[0].as_str().context("path command")? {
+            "M" => p.move_to(num(1), num(2)),
+            "L" => p.line_to(num(1), num(2)),
+            "Q" => p.quad_to(num(1), num(2), num(3), num(4)),
+            "C" => p.cubic_to(num(1), num(2), num(3), num(4), num(5), num(6)),
+            "Z" => p.close(),
+            other => bail!("Unknown path operation {other}"),
+        }
+    }
+    p.finish().context("Empty path")
+}
+/// Rasterises a leaf, blurs it and clips the result, writing the visible part into `pix`
+/// (which must be transparent) and returning its region. Blur runs before the clip, as CSS
+/// and canvas filters order them, so the clip edge stays sharp.
+///
+/// Support: a leaf's pixels spread by the kernel radius r = ceil(3 sigma), so the output
+/// region is the padded leaf bounds grown by r, clipped to the frame. A separable pass only
+/// needs source pixels within r in each axis, so the source is the padded leaf bounds clipped
+/// to the frame grown by r. Source pixels outside that box are transparent or unused, which
+/// keeps offscreen leaves exact and memory proportional to the frame, not the leaf.
+fn blurred_leaf(
+    pix: &mut Pixmap,
+    geometry: &tiny_skia::Path,
+    paint: &Paint,
+    stroke: Option<f32>,
+    transform: Transform,
+    sigma: f32,
+    mask: Option<&Mask>,
+) -> Result<Option<Region>> {
+    let scale = max_scale(transform);
+    if !(scale.is_finite() && scale > 0.) {
+        return Ok(None);
+    }
+    let sigma = sigma * scale;
+    let radius = (3. * sigma).ceil() as i64;
+    if radius > MAX_BLUR_RADIUS {
+        bail!("blur radius {radius}px exceeds the {MAX_BLUR_RADIUS}px limit");
+    }
+    let pad = match stroke {
+        Some(w) => 2. + 2. * w * scale,
+        None => 2.,
+    };
+    let (width, height) = (pix.width() as i64, pix.height() as i64);
+    let Some(bounds) = geometry.bounds().transform(transform) else {
+        return Ok(None);
+    };
+    let whole = |v: f32| v.clamp(-1e9, 1e9);
+    let leaf = [
+        whole(bounds.left() - pad).floor() as i64,
+        whole(bounds.top() - pad).floor() as i64,
+        whole(bounds.right() + pad).ceil() as i64,
+        whole(bounds.bottom() + pad).ceil() as i64,
+    ];
+    let out = [
+        (leaf[0] - radius).max(0),
+        (leaf[1] - radius).max(0),
+        (leaf[2] + radius).min(width),
+        (leaf[3] + radius).min(height),
+    ];
+    let src = [
+        leaf[0].max(-radius),
+        leaf[1].max(-radius),
+        leaf[2].min(width + radius),
+        leaf[3].min(height + radius),
+    ];
+    if out[2] <= out[0] || out[3] <= out[1] || src[2] <= src[0] || src[3] <= src[1] {
+        return Ok(None);
+    }
+    let (ow, oh) = ((out[2] - out[0]) as usize, (out[3] - out[1]) as usize);
+    let (sw, sh) = ((src[2] - src[0]) as usize, (src[3] - src[1]) as usize);
+    let taps = 2 * radius as usize + 1;
+    let work = ((ow * sh + ow * oh) * taps * 4) as u64;
+    if work > MAX_BLUR_WORK {
+        bail!("blurred leaf needs {work} channel taps, above the {MAX_BLUR_WORK} limit; reduce the blur or the leaf size");
+    }
+    let mut source = Pixmap::new(sw as u32, sh as u32).context("blur source allocation")?;
+    let at = transform.post_translate(-src[0] as f32, -src[1] as f32);
+    match stroke {
+        Some(w) => source.stroke_path(
+            geometry,
+            paint,
+            &Stroke {
+                width: w,
+                ..Default::default()
+            },
+            at,
+            None,
+        ),
+        None => source.fill_path(geometry, paint, FillRule::Winding, at, None),
+    }
+    let kernel: Vec<f32> = {
+        let w: Vec<f32> = (-radius..=radius)
+            .map(|i| (-((i * i) as f32) / (2. * sigma * sigma)).exp())
+            .collect();
+        let total: f32 = w.iter().sum();
+        w.into_iter().map(|x| x / total).collect()
+    };
+    let round = |x: f32| (x + 0.5).min(255.) as u8;
+    let src_px = source.data();
+    // Horizontal pass over source rows, for output columns only. Intermediate values are
+    // premultiplied 8-bit, as the surface itself is.
+    let mut mid = vec![0u8; ow * sh * 4];
+    for row in 0..sh {
+        for x in 0..ow {
+            let cx = out[0] + x as i64;
+            let mut acc = [0f32; 4];
+            for (j, w) in kernel.iter().enumerate() {
+                let sx = cx + j as i64 - radius - src[0];
+                if sx < 0 || sx >= sw as i64 {
+                    continue;
+                }
+                let i = (row * sw + sx as usize) * 4;
+                for c in 0..4 {
+                    acc[c] += w * src_px[i + c] as f32;
+                }
+            }
+            let o = (row * ow + x) * 4;
+            for c in 0..4 {
+                mid[o + c] = round(acc[c]);
+            }
+        }
+    }
+    // Vertical pass into the output region, then the clip mask (blur first, clip after).
+    let width = width as usize;
+    let data = pix.data_mut();
+    for y in 0..oh {
+        let cy = out[1] + y as i64;
+        for x in 0..ow {
+            let cx = out[0] + x as i64;
+            let mut acc = [0f32; 4];
+            for (k, w) in kernel.iter().enumerate() {
+                let sy = cy + k as i64 - radius - src[1];
+                if sy < 0 || sy >= sh as i64 {
+                    continue;
+                }
+                let i = (sy as usize * ow + x) * 4;
+                for c in 0..4 {
+                    acc[c] += w * mid[i + c] as f32;
+                }
+            }
+            let m = mask.map_or(1., |m| m.data()[cy as usize * width + cx as usize] as f32 / 255.);
+            let o = (cy as usize * width + cx as usize) * 4;
+            // Rounding can lift a channel above alpha; clamp to keep premultiplied pixels valid.
+            let a = round(acc[3] * m);
+            data[o + 3] = a;
+            for c in 0..3 {
+                data[o + c] = round(acc[c] * m).min(a);
+            }
+        }
+    }
+    Ok(Some((
+        out[0] as u32,
+        out[1] as u32,
+        out[2] as u32,
+        out[3] as u32,
+    )))
+}
 /// Per-leaf compositing modes. A closed set: each variant has one fixed-function
 /// pipeline, built once. `screen` and `multiply` are deferred, not impossible: screen is
 /// exact with fixed factors (colour One/OneMinusSrc, alpha One/OneMinusSrcAlpha), and
@@ -533,7 +727,7 @@ impl Gpu {
                 },
             );
             let hardware = !matches!(adapter_info.device_type, wgpu::DeviceType::Cpu);
-            let info = json!({"available":true,"apiVersion":"0.1.0","features":["groups","transforms","clipping","paths","text","text-letter-spacing","images","cameras","transitions","video","shader-wgsl","supersampling","motion-blur","svg","gradients","frame-grain","blend-lighter"],"adapter":adapter_info.name,"driver":adapter_info.driver_info,"hardware":hardware,"maxDimensions":limits.max_texture_dimension_2d,"textureFormats":["rgba16float"],"workingBitDepth":16,"rasterization":"Rust tiny-skia/Cosmic Text; linear-light wgpu composition"});
+            let info = json!({"available":true,"apiVersion":"0.1.0","features":["groups","transforms","clipping","paths","text","text-letter-spacing","images","cameras","transitions","video","shader-wgsl","supersampling","motion-blur","svg","gradients","frame-grain","blend-lighter","blur"],"adapter":adapter_info.name,"driver":adapter_info.driver_info,"hardware":hardware,"maxDimensions":limits.max_texture_dimension_2d,"textureFormats":["rgba16float"],"workingBitDepth":16,"rasterization":"Rust tiny-skia/Cosmic Text; linear-light wgpu composition"});
             Ok(Self {
                 device,
                 queue,
@@ -1084,6 +1278,10 @@ impl Renderer {
         if !n["blend"].is_null() && !leaf {
             bail!("blend applies to rect, circle, path, text, image and video leaves only; a {kind} node cannot set it");
         }
+        if !n["blur"].is_null() && !matches!(kind, "rect" | "circle" | "path") {
+            bail!("blur applies to rect, circle and path leaves only; a {kind} node cannot set it");
+        }
+        let blur = blur_sigma(n)?;
         if !["group", "camera"].contains(&kind) {
             if kind == "shader" {
                 self.gpu.effect(
@@ -1144,6 +1342,20 @@ impl Renderer {
                 };
                 let x = v(n, "x", 0.);
                 let y = v(n, "y", 0.);
+                if let Some(sigma) = blur {
+                    let stroke_width = (kind == "path" && n["stroke"].as_bool().unwrap_or(false))
+                        .then(|| v(n, "strokeWidth", 1.));
+                    let geometry = leaf_geometry(n, kind)?;
+                    region = blurred_leaf(
+                        &mut pix,
+                        &geometry,
+                        &paint,
+                        stroke_width,
+                        transform,
+                        sigma,
+                        mask.as_deref(),
+                    )?;
+                } else {
                 match kind {
                     "rect" => {
                         let r = Rect::from_xywh(x, y, v(n, "width", 0.), v(n, "height", 0.))
@@ -1163,19 +1375,7 @@ impl Renderer {
                             .and_then(|b| region_of(b, 2., width, height));
                     }
                     "path" => {
-                        let mut p = PathBuilder::new();
-                        for command in n["commands"].as_array().context("path commands")? {
-                            let num = |i| command[i].as_f64().unwrap_or(0.) as f32;
-                            match command[0].as_str().context("path command")? {
-                                "M" => p.move_to(num(1), num(2)),
-                                "L" => p.line_to(num(1), num(2)),
-                                "Q" => p.quad_to(num(1), num(2), num(3), num(4)),
-                                "C" => p.cubic_to(num(1), num(2), num(3), num(4), num(5), num(6)),
-                                "Z" => p.close(),
-                                other => bail!("Unknown path operation {other}"),
-                            }
-                        }
-                        let p = p.finish().context("Empty path")?;
+                        let p = path_commands(n)?;
                         let stroked = n["stroke"].as_bool().unwrap_or(false);
                         // A stroke reaches at most a miter limit (4) of half widths past the
                         // outline, and hairlines are widened to a pixel.
@@ -1423,6 +1623,7 @@ impl Renderer {
                             .and_then(|b| region_of(b, 2., width, height));
                     }
                     other => bail!("Unsupported native operation {other}"),
+                }
                 }
                 self.prof.add(
                     if kind == "text" {

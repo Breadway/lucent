@@ -20,6 +20,7 @@ The engine preserves the originals through browser compatibility adapters. Film 
 | Seeded frame-level grain post effect                                         | New            | film `grain` schema, `frame-grain` feature          |
 | Linear/radial gradient fills on rect/circle/path (linear-light or sRGB mix) | New            | `gradients` capability, docs/native-gradients.md    |
 | Per-leaf `blend`: `normal` and additive `lighter` (linear light)           | New            | `blend-lighter` capability, docs/native-blend.md    |
+| Per-leaf Gaussian `blur` on rect/circle/path leaves (phase 1 of LUCENT-18) | New            | `blur` capability, docs/native-blur.md              |
 | Colour-managed multi-deliverable export                                    | New            | Rust frame boundary and FFmpeg conversion           |
 | Quotas, key pools and durable TTS caching                                  | New            | film-linked scripts, SQLite ledger                  |
 

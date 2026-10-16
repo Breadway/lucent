@@ -120,6 +120,11 @@ export interface ShapeProps {
    * (additive in linear light, needs the "blend-lighter" capability). Leaves only.
    */
   blend?: BlendMode;
+  /**
+   * Gaussian blur sigma in design px (0 to 128, default none). Applied before `clip`.
+   * Needs the "blur" capability. Rect, circle and path leaves only.
+   */
+  blur?: number;
   [key: string]: unknown;
 }
 export type BlendMode = "normal" | "lighter";
