@@ -76,7 +76,8 @@ export async function main() {
     from: number(o.from ?? 0, "from", 0, 1e7),
     to: o.to === undefined ? undefined : number(o.to, "to", 0, 1e7),
     workers: number(o.workers ?? 2, "workers", 1, 2),
-    chunk: number(o.chunk ?? 120, "chunk", 1, 1800),
+    chunk:
+      o.chunk === undefined ? undefined : number(o.chunk, "chunk", 1, 1800),
     encoder: o.encoder || "auto",
     softwareFallback: !!o["software-fallback"],
     codecs: (o.codec || "av1").split(","),
@@ -120,7 +121,8 @@ export async function main() {
   if (!["png", "rgba"].includes(settings.capture))
     throw Error("capture must be png or experimental rgba");
   for (const k of ["workers", "chunk", "ss", "mb"])
-    if (!Number.isInteger(settings[k])) throw Error(`${k} must be an integer`);
+    if (settings[k] !== undefined && !Number.isInteger(settings[k]))
+      throw Error(`${k} must be an integer`);
   if (!["fit", "fill", "stretch"].includes(settings.fit))
     throw Error("fit must be fit, fill or stretch");
   if (command === "tts") {
