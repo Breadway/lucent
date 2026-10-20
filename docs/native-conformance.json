@@ -26,7 +26,8 @@
       "svg",
       "gradients",
       "frame-grain",
-      "blend-lighter"
+      "blend-lighter",
+      "blur"
     ],
     "hardware": true,
     "maxDimensions": 16384,

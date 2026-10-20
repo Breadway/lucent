@@ -172,6 +172,7 @@ export async function main() {
             "svg",
             "gradients",
             "blend-lighter",
+            "blur",
             "canvas",
             ...(film.caps.webgl ? ["webgl"] : []),
             ...(film.caps.webgpu ? ["webgpu"] : []),

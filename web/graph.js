@@ -104,6 +104,8 @@ export class GraphRenderer {
       if (n.effect) throw Error(`Unsupported portable effect: ${n.effect}`);
       if (n.blend != null && !blendLeafTypes.has(n.type))
         throw Error(`blend applies to rect, circle, path, text, image and video leaves only; a ${n.type} node cannot set it`);
+      if (n.blur != null && !["rect", "circle", "path"].includes(n.type))
+        throw Error(`blur applies to rect, circle and path leaves only; a ${n.type} node cannot set it`);
       if (leafTypes.has(n.type)) {
         lc.resetTransform();
         lc.clearRect(0, 0, this.layer.width, this.layer.height);
@@ -144,12 +146,21 @@ export class GraphRenderer {
     c.translate(n.translate?.[0] || 0, n.translate?.[1] || 0);
     c.rotate(n.rotate || 0);
     c.scale(n.scale?.[0] ?? 1, n.scale?.[1] ?? 1);
+    if (n.effect) throw Error(`Unsupported portable effect: ${n.effect}`);
+    if (n.blur != null) {
+      if (!Number.isFinite(n.blur) || n.blur < 0 || n.blur > 128)
+        throw Error("blur must be between 0 and 128 design px");
+      // Blur the leaf before the clip, as the native renderer does. Canvas filter lengths are
+      // in device pixels, so scale sigma by the transform's largest axis stretch, as native does.
+      const m = c.getTransform();
+      const stretch = Math.max(Math.hypot(m.a, m.b), Math.hypot(m.c, m.d));
+      if (n.blur > 0) c.filter = `blur(${n.blur * stretch}px)`;
+    }
     if (n.clip) {
       c.beginPath();
       c.rect(...n.clip);
       c.clip();
     }
-    if (n.effect) throw Error(`Unsupported portable effect: ${n.effect}`);
     const stroked = n.type === "path" && n.stroke;
     const fill =
       !stroked && ["rect", "circle", "path"].includes(n.type)
@@ -247,6 +258,8 @@ export class GraphRenderer {
       case "shader":
         throw Error("Shader requires a backend-specific renderer capability");
     }
+    // A leaf's blur applies to the leaf only, not to children drawn inside it.
+    c.filter = "none";
     for (const child of n.children || []) this.node(c, child);
     c.restore();
   }
