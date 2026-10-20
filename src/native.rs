@@ -397,11 +397,14 @@ fn blurred_leaf(
         None => source.fill_path(geometry, paint, FillRule::Winding, at, None),
     }
     let kernel: Vec<f32> = {
-        let w: Vec<f32> = (-radius..=radius)
-            .map(|i| (-((i * i) as f32) / (2. * sigma * sigma)).exp())
+        // f64 keeps the exponent finite for a sigma that underflows f32 when squared.
+        // Such a sigma collapses to a delta kernel instead of a NaN one.
+        let s = sigma as f64;
+        let w: Vec<f64> = (-radius..=radius)
+            .map(|i| (-((i * i) as f64) / (2. * s * s)).exp())
             .collect();
-        let total: f32 = w.iter().sum();
-        w.into_iter().map(|x| x / total).collect()
+        let total: f64 = w.iter().sum();
+        w.into_iter().map(|x| (x / total) as f32).collect()
     };
     let round = |x: f32| (x + 0.5).min(255.) as u8;
     let src_px = source.data();
