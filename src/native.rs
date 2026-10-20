@@ -283,7 +283,10 @@ fn blur_sigma(n: &Value) -> Result<Option<f32>> {
             if !sigma.is_finite() || !(0. ..=MAX_BLUR_SIGMA as f64).contains(&sigma) {
                 bail!("blur must be between 0 and {MAX_BLUR_SIGMA} design px, got {sigma}");
             }
-            Ok((sigma > 0.).then_some(sigma as f32))
+            // Check after narrowing: a positive f64 below the smallest positive f32
+            // would otherwise become 0.0 and reach the kernel as a division by zero.
+            let sigma = sigma as f32;
+            Ok((sigma > 0.).then_some(sigma))
         }
     }
 }
