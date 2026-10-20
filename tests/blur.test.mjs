@@ -165,6 +165,20 @@ test("hostile blur values are rejected before rendering", NATIVE, async () => {
   }
 });
 
+test("a sigma far below one pixel renders like no blur", NATIVE, async () => {
+  const leaf = (blur) => [
+    { type: "rect", x: 10, y: 5, width: 20, height: 20, color: "#336699", ...(blur === undefined ? {} : { blur }) },
+  ];
+  const plain = await renderNative("tiny-plain", 40, 30, leaf());
+  // f32 squared the first sigma to zero and produced a NaN kernel, which rendered
+  // the whole leaf white. The second narrows to f32 zero and must be treated as
+  // no blur rather than reaching the kernel as a division by zero.
+  for (const sigma of [1e-30, 1e-46]) {
+    const tiny = await renderNative("tiny-zero", 40, 30, leaf(sigma));
+    assert.ok(tiny.png.equals(plain.png), `sigma ${sigma} changed the frame: ${tiny.at(20, 15)} vs ${plain.at(20, 15)}`);
+  }
+});
+
 test("native blur agrees with the browser reference within a bounded error", NATIVE, async () => {
   const leaves = [{ type: "rect", x: 16, y: 8, width: 32, height: 16, color: "#ffffff", blur: 2 }];
   const n = await renderNative("ref-native", 64, 32, leaves);

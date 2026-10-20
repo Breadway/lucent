@@ -283,7 +283,10 @@ fn blur_sigma(n: &Value) -> Result<Option<f32>> {
             if !sigma.is_finite() || !(0. ..=MAX_BLUR_SIGMA as f64).contains(&sigma) {
                 bail!("blur must be between 0 and {MAX_BLUR_SIGMA} design px, got {sigma}");
             }
-            Ok((sigma > 0.).then_some(sigma as f32))
+            // Check after narrowing: a positive f64 below the smallest positive f32
+            // would otherwise become 0.0 and reach the kernel as a division by zero.
+            let sigma = sigma as f32;
+            Ok((sigma > 0.).then_some(sigma))
         }
     }
 }
@@ -397,11 +400,14 @@ fn blurred_leaf(
         None => source.fill_path(geometry, paint, FillRule::Winding, at, None),
     }
     let kernel: Vec<f32> = {
-        let w: Vec<f32> = (-radius..=radius)
-            .map(|i| (-((i * i) as f32) / (2. * sigma * sigma)).exp())
+        // f64 keeps the exponent finite for a sigma that underflows f32 when squared.
+        // Such a sigma collapses to a delta kernel instead of a NaN one.
+        let s = sigma as f64;
+        let w: Vec<f64> = (-radius..=radius)
+            .map(|i| (-((i * i) as f64) / (2. * s * s)).exp())
             .collect();
-        let total: f32 = w.iter().sum();
-        w.into_iter().map(|x| x / total).collect()
+        let total: f64 = w.iter().sum();
+        w.into_iter().map(|x| (x / total) as f32).collect()
     };
     let round = |x: f32| (x + 0.5).min(255.) as u8;
     let src_px = source.data();
