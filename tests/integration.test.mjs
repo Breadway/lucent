@@ -53,6 +53,9 @@ test(
       codecs: ["h264", "h265", "av1"],
       bitrate: 3000000,
       cpu: true,
+      // Keep the frame files so the third render can prove per-frame repair.
+      // Encoded chunks stay restorable from their verified segment either way.
+      keepFrames: true,
       work,
       out: path.join(work, "out.mp4"),
       backend: "browser",
@@ -95,9 +98,16 @@ test(
       const second = await render(p, opts);
       assert.equal(second.metrics.framesReused, 3);
       const cache = fs.readdirSync(work).find((n) => n.length === 64);
-      fs.writeFileSync(path.join(work, cache, "30-33", "30.png"), "corrupt");
+      const chunk = path.join(work, cache, "30-33");
+      // A verified encoded segment is restored without touching its frames, so
+      // drop this codec's segment first to force the frame path, then corrupt one
+      // frame. The other two are reused and only the corrupt frame is captured.
+      fs.rmSync(path.join(chunk, "h264.mp4"));
+      fs.rmSync(path.join(chunk, "h264.mp4.json"));
+      fs.writeFileSync(path.join(chunk, "30.png"), "corrupt");
       const third = await render(p, opts);
       assert.equal(third.metrics.framesCaptured, 1);
+      assert.equal(third.metrics.framesReused, 2);
     } finally {
       fs.rmSync(work, { recursive: true, force: true });
     }

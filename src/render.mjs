@@ -316,6 +316,9 @@ export async function render(p, settings, { benchmark = false } = {}) {
             if (restored) {
               chunkResults[index] = restored;
               chunkIntervals.push([chunkStarted, performance.now()]);
+              // A whole restored segment still reused its frames; the per-frame
+              // loop below is skipped, so account for them here.
+              metrics.framesReused += b - a;
               completed += b - a;
               atomicJSON(path.join(root, "status.json"), {
                 state: "running",
