@@ -95,7 +95,17 @@ export function encoderArgs(codec, encoder, bitrate, quality) {
 }
 export function colorFilter(codec, encoder) {
   const fmt = codec === "h264" ? "yuv420p" : "yuv420p10le";
-  return `format=gbrp16le,zscale=primariesin=709:transferin=iec61966-2-1:matrixin=gbr:rangein=full:primaries=709:transfer=709:matrix=709:range=limited:dither=error_diffusion,format=${fmt}${encoder === "vaapi" ? `,format=${codec === "h264" ? "nv12" : "p010le"},hwupload` : ""}`;
+  // Screen-authored SDR frames keep their sRGB transfer values. Converting
+  // sRGB-encoded values onto the BT.709 OETF is only undone by a colour-managed
+  // BT.1886 display; browsers, YouTube and most desktop players pass a
+  // bt709-tagged SDR stream through, which lifts shadows by about 11 levels
+  // against the rendered still. Equal transferin/transfer values make the
+  // transfer step an identity that leaves the 16-bit sRGB PPM samples alone
+  // while primaries, matrix (RGB full to YUV 709 limited) and range are
+  // converted. They are 709 rather than iec61966-2-1 because zscale also
+  // retags the output frames with the converted transfer; iec61966-2-1 here
+  // would override the bt709 stream tags set by the caller.
+  return `format=gbrp16le,zscale=primariesin=709:transferin=709:matrixin=gbr:rangein=full:primaries=709:transfer=709:matrix=709:range=limited:dither=error_diffusion,format=${fmt}${encoder === "vaapi" ? `,format=${codec === "h264" ? "nv12" : "p010le"},hwupload` : ""}`;
 }
 export function encodingOptions(codec, encoder, settings) {
   return [
