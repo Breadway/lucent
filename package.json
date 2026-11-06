@@ -17,7 +17,8 @@
     "test:tts": "python3 -m unittest discover -s tests -p 'test_*.py'",
     "build": "cargo build --release --locked",
     "bench:capture": "node tools/run-capture-pair.mjs",
-    "bench:native": "node tools/run-native-benchmark.mjs"
+    "bench:native": "node tools/run-native-benchmark.mjs",
+    "bench:handoff": "node tools/bench-frame-handoff.mjs"
   },
   "dependencies": {
     "esbuild": "0.25.12",
