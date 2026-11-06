@@ -75,7 +75,7 @@ test(
           "-frames:v",
           "1",
           "-vf",
-          "zscale=primariesin=709:transferin=709:matrixin=709:rangein=limited:primaries=709:transfer=iec61966-2-1:matrix=gbr:range=full,format=gbrp,format=rgb24",
+          "zscale=primariesin=709:transferin=709:matrixin=709:rangein=limited:primaries=709:transfer=709:matrix=709:range=full,format=rgb24",
           "-f",
           "rawvideo",
           "-",
