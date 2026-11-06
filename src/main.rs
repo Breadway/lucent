@@ -29,6 +29,30 @@ fn normalize_frame(file: &str) -> Result<()> {
     }
     Ok(())
 }
+/// Transfer table for the encoder hand-off: sRGB16 -> linear f16 -> sRGB16.
+/// The double conversion matches the historical half-float transfer, and is
+/// the identity for every sample produced by the fast f16 encoder. Build it
+/// once per process, never per frame.
+fn frame_stream_lut() -> Vec<u16> {
+    let mut lut = vec![0u16; 65536];
+    for (i, v) in lut.iter_mut().enumerate() {
+        let s = i as f32 / 65535.;
+        let l = if s <= 0.04045 {
+            s / 12.92
+        } else {
+            ((s + 0.055) / 1.055).powf(2.4)
+        };
+        let l = f16::from_f32(l).to_f32();
+        let s = if l <= 0.0031308 {
+            12.92 * l
+        } else {
+            1.055 * l.powf(1. / 2.4) - 0.055
+        };
+        *v = (s * 65535.).round() as u16;
+    }
+    lut
+}
+
 fn main() -> Result<()> {
     let args: Vec<String> = env::args().skip(1).collect();
     match args.first().map(String::as_str) {
@@ -65,24 +89,9 @@ fn main() -> Result<()> {
         Some("frame-stream") => {
             let mut stdin = io::BufReader::new(io::stdin().lock());
             let mut stdout = io::BufWriter::new(io::stdout().lock());
-            // The transfer table is process-constant; rebuilding it per
-            // frame repeats 131k powf evaluations for identical bytes.
-            let mut lut = vec![0u16; 65536];
-            for (i, v) in lut.iter_mut().enumerate() {
-                let s = i as f32 / 65535.;
-                let l = if s <= 0.04045 {
-                    s / 12.92
-                } else {
-                    ((s + 0.055) / 1.055).powf(2.4)
-                };
-                let l = f16::from_f32(l).to_f32();
-                let s = if l <= 0.0031308 {
-                    12.92 * l
-                } else {
-                    1.055 * l.powf(1. / 2.4) - 0.055
-                };
-                *v = (s * 65535.).round() as u16;
-            }
+            // The transfer table is process-constant; building it once
+            // avoids repeating 131k powf evaluations for identical bytes.
+            let lut = frame_stream_lut();
             let mut row: Vec<u8> = Vec::new();
             loop {
                 let mut size = [0; 4];
@@ -165,6 +174,28 @@ fn main() -> Result<()> {
                 .status()
                 .context("Node.js 22 required for browser orchestration")?;
             std::process::exit(status.code().unwrap_or(1));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The hand-off must not change pixels captured by the single-sample fast
+    /// path. Every f16 bit pattern maps to one sRGB16 sample; the transfer
+    /// table must return that same sample. The reference encoder writes the
+    /// same sample for the same value, so the whole round trip is lossless.
+    #[test]
+    fn frame_stream_lut_is_identity_for_half_origin_samples() {
+        let encode = native::srgb_lut();
+        let decode = frame_stream_lut();
+        for bits in 0..=u16::MAX {
+            let sample = encode[bits as usize];
+            assert_eq!(
+                decode[sample as usize], sample,
+                "half pattern {bits} mapped to sRGB sample {sample} changed in the hand-off"
+            );
         }
     }
 }

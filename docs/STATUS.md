@@ -24,3 +24,8 @@ colour conversions. On a 187-primitive 1080p scene a frame fell from about 1000 
 with decoded pixels unchanged (`LUCENT_VERIFY_BBOX=1` checks the regions). `render` validates
 cached frames from the PNG header instead of decoding them, which made a fully cached re-run of
 48 frames 11x faster.
+
+The separate hand-off from a finished frame through `frame-stream` to ffmpeg was measured in
+2026-11 (LUCENT-2); see `docs/frame-handoff.md`. The transfer table is process-constant and the
+internal PNG uses Fast compression. A raw frame packet was rejected because 16.6 MB frames are
+slower to write and read than the PNG they replace and would inflate the chunk cache about 34x.

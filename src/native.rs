@@ -1926,7 +1926,7 @@ fn encode_frame_f16(bytes: &[u8], lut: &[u16], width: u32, height: u32) -> Resul
     }
     png16(&out, width, height)
 }
-fn srgb_lut() -> Vec<u16> {
+pub(crate) fn srgb_lut() -> Vec<u16> {
     (0..=u16::MAX)
         .map(|bits| (encoded(f16::from_bits(bits).to_f32()) * 65535.).round() as u16)
         .collect()
@@ -2180,6 +2180,46 @@ mod tests {
         assert_ne!(
             Renderer::text_key(&plain, &transform, 640, 360),
             Renderer::text_key(&spaced, &transform, 640, 360)
+        );
+    }
+
+    /// The render-to-encoder hand-off reads the fast f16 encoder when a frame
+    /// is a single unscaled sample. It must produce exactly the PNG bytes of
+    /// the reference f32 encoder, not merely a close match, because that PNG
+    /// is both the cache entry and the encoder input.
+    #[test]
+    fn fast_f16_encode_is_byte_identical_to_reference() {
+        let width = 256u32;
+        let height = 256u32;
+        let mut values = Vec::with_capacity((width * height * 3) as usize);
+        let mut rgba = Vec::with_capacity((width * height * 8) as usize);
+        for pixel in 0..width * height {
+            for channel in 0..3 {
+                // Cover every half bit pattern three times, including
+                // subnormals, negative zero and non-finite values.
+                let bits = ((pixel * 3 + channel) % 65536) as u16;
+                values.push(f16::from_bits(bits).to_f32());
+                rgba.extend_from_slice(&bits.to_le_bytes());
+            }
+            rgba.extend_from_slice(&f16::from_f32(1.).to_le_bytes());
+        }
+        let reference = encode_frame(&values, width, height).expect("reference encode");
+        let fast = encode_frame_f16(&rgba, &srgb_lut(), width, height).expect("fast encode");
+        assert_eq!(
+            reference, fast,
+            "fast f16 PNG must be byte-identical to the reference encoder"
+        );
+        let decoded_reference = image::load_from_memory(&reference)
+            .expect("decode reference")
+            .into_rgba16()
+            .into_raw();
+        let decoded_fast = image::load_from_memory(&fast)
+            .expect("decode fast")
+            .into_rgba16()
+            .into_raw();
+        assert_eq!(
+            decoded_reference, decoded_fast,
+            "decoded hand-off pixels must be identical"
         );
     }
 
